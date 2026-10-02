@@ -209,12 +209,11 @@ impl Renderer {
     }
 
     pub fn render(&mut self, scene: &Scene) -> Result<()> {
-        let frame = match self.surface.get_current_texture() {
-            wgpu::CurrentSurfaceTexture::Success(frame) => frame,
-            wgpu::CurrentSurfaceTexture::Suboptimal(frame) => {
-                self.surface.configure(&self.device, &self.config);
-                frame
-            }
+        // A suboptimal frame is still drawn; the surface is reconfigured only
+        // after it is presented, since wgpu forbids that while it is held.
+        let (frame, suboptimal) = match self.surface.get_current_texture() {
+            wgpu::CurrentSurfaceTexture::Success(frame) => (frame, false),
+            wgpu::CurrentSurfaceTexture::Suboptimal(frame) => (frame, true),
             wgpu::CurrentSurfaceTexture::Timeout | wgpu::CurrentSurfaceTexture::Occluded => {
                 return Ok(());
             }
@@ -268,6 +267,9 @@ impl Renderer {
         self.queue.submit(Some(encoder.finish()));
         self.window.pre_present_notify();
         self.queue.present(frame);
+        if suboptimal {
+            self.surface.configure(&self.device, &self.config);
+        }
         self.text.atlas.trim();
         Ok(())
     }
