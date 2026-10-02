@@ -26,7 +26,11 @@ impl Analyzer {
             fft_size >= 8 && fft_size.is_power_of_two(),
             "fft_size must be a power of two >= 8"
         );
-        assert!(band_count > 0, "band_count must be > 0");
+        assert!(
+            band_count > 0 && band_count <= fft_size / 2 - 2,
+            "band_count must be in 1..={}",
+            fft_size / 2 - 2
+        );
 
         let fft = RealFftPlanner::<f32>::new().plan_fft_forward(fft_size);
         let window = hann(fft_size);
@@ -78,8 +82,10 @@ impl Analyzer {
 
     /// Analyzes the current window, writing one magnitude per band into `out`.
     ///
-    /// Each band is the mean of `sqrt(|X[k]|)` over its bins; the square root
-    /// compresses the dynamic range the same way the original C version did.
+    /// Each band is `sqrt(|X[k]|)` of its loudest bin. Taking the peak rather
+    /// than the mean keeps a tone equally tall whether its band is one bin or
+    /// thirty wide; the square root compresses the dynamic range like the
+    /// original C version.
     pub fn analyze(&mut self, out: &mut [f32]) {
         assert_eq!(
             out.len(),
@@ -102,11 +108,11 @@ impl Analyzer {
             .expect("buffer sizes come from the planner");
 
         for (o, range) in out.iter_mut().zip(&self.bands) {
-            let sum: f32 = self.spectrum[range.clone()]
+            let peak = self.spectrum[range.clone()]
                 .iter()
-                .map(|c| (c.norm() * self.scale).sqrt())
-                .sum();
-            *o = sum / range.len() as f32;
+                .map(|c| c.norm())
+                .fold(0.0, f32::max);
+            *o = (peak * self.scale).sqrt();
         }
     }
 }
@@ -131,26 +137,28 @@ fn hann(n: usize) -> Vec<f32> {
         .collect()
 }
 
-/// Log-spaced bin ranges from bin 2 to Nyquist, as in the original C version.
-/// Low bands narrower than one bin are widened to one bin, so neighbours may repeat.
+/// Contiguous bin ranges from bin 2 to Nyquist, log-spaced like the original
+/// C version. Where log spacing would make bands narrower than one bin (the
+/// lowest frequencies), edges step one bin at a time instead, so no bin is
+/// shown twice.
 fn log_bands(fft_size: usize, band_count: usize) -> Vec<Range<usize>> {
     let nyquist = fft_size / 2;
     let log_min = 2f32.log10();
     let log_max = (nyquist as f32).log10();
-    let edge = |i: usize| {
-        if i == band_count {
-            return nyquist; // avoid float error truncating the last edge
-        }
+
+    let mut edges = Vec::with_capacity(band_count + 1);
+    edges.push(2);
+    for i in 1..band_count {
         let t = i as f32 / band_count as f32;
-        10f32.powf(log_min + (log_max - log_min) * t) as usize
-    };
-    (0..band_count)
-        .map(|i| {
-            let start = edge(i).min(nyquist - 1);
-            let end = edge(i + 1).min(nyquist).max(start + 1);
-            start..end
-        })
-        .collect()
+        let log_edge = 10f32.powf(log_min + (log_max - log_min) * t) as usize;
+        let prev = edges[i - 1];
+        // Strictly increasing, leaving at least one bin for each band left.
+        let edge = log_edge.max(prev + 1).min(nyquist - (band_count - i));
+        edges.push(edge);
+    }
+    edges.push(nyquist);
+
+    edges.windows(2).map(|w| w[0]..w[1]).collect()
 }
 
 #[cfg(test)]
@@ -175,9 +183,10 @@ mod tests {
         assert_eq!(bands[BANDS - 1].end, N / 2);
         for w in bands.windows(2) {
             assert!(!w[0].is_empty());
-            assert!(w[0].start <= w[1].start);
-            assert!(w[0].end <= w[1].end);
+            assert_eq!(w[0].end, w[1].start, "bands must be contiguous");
         }
+        // Upper bands still follow the log curve.
+        assert!(bands[BANDS - 1].len() > 20);
     }
 
     #[test]
@@ -225,6 +234,30 @@ mod tests {
             .position(|r| *r == (bin..bin + 1))
             .expect("a single-bin band at a low bin");
         assert!((out[band] - 1.0).abs() < 1e-3, "got {}", out[band]);
+    }
+
+    #[test]
+    fn tones_are_equally_tall_across_band_widths() {
+        let mut heights = Vec::new();
+        for bin in [20usize, 150, 700] {
+            let mut a = Analyzer::new(N, BANDS);
+            let mut out = vec![0.0; BANDS];
+            a.push(&sine(bin as f32, 0.5, N));
+            a.analyze(&mut out);
+            heights.push(out.iter().copied().fold(0.0, f32::max));
+        }
+        for h in &heights {
+            assert!((h - heights[0]).abs() < 0.02, "{heights:?}");
+        }
+    }
+
+    #[test]
+    fn small_band_counts_work() {
+        for bands in [1, 2, 7, N / 2 - 2] {
+            let a = Analyzer::new(N, bands);
+            assert_eq!(a.band_ranges().len(), bands);
+            assert_eq!(a.band_ranges()[bands - 1].end, N / 2);
+        }
     }
 
     #[test]

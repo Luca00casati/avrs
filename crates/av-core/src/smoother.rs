@@ -1,9 +1,10 @@
 /// Turns raw band magnitudes into bar and peak heights for drawing.
 ///
-/// Heights are normalized so 1.0 is the full window height; they can briefly
-/// exceed 1.0 on transients, as in the original C version. Smoothing rates are
-/// expressed per 60 Hz frame and scaled by `dt`, so the look does not depend
-/// on the frame rate.
+/// Heights are normalized so 1.0 is the full window height. An automatic gain
+/// keeps the loudest band near [`HEADROOM`](Self::HEADROOM): it rises quickly
+/// on transients and falls slowly, so bars stay inside the window (heights are
+/// also capped at 1.0). Smoothing rates are expressed per 60 Hz frame and
+/// scaled by `dt`, so the look does not depend on the frame rate.
 #[derive(Debug, Clone)]
 pub struct Smoother {
     avg_max: f32,
@@ -13,8 +14,12 @@ pub struct Smoother {
 }
 
 impl Smoother {
-    /// How fast the auto-gain follows the loudest band.
-    const GAIN_RATE: f32 = 0.1;
+    /// How fast the auto-gain rises to a louder band.
+    const GAIN_ATTACK: f32 = 0.5;
+    /// How fast the auto-gain relaxes when things get quieter.
+    const GAIN_RELEASE: f32 = 0.02;
+    /// Height the loudest band settles at, leaving room for peaks above.
+    pub const HEADROOM: f32 = 0.85;
     /// How fast bars follow their target height.
     const BAR_RATE: f32 = 0.2;
     /// How fast peak markers fall back to the bars.
@@ -50,11 +55,17 @@ impl Smoother {
         let n = mags.len();
 
         let max = mags.iter().copied().fold(Self::MIN_LEVEL, f32::max);
-        self.avg_max = lerp(self.avg_max, max, rate(Self::GAIN_RATE, dt));
+        let gain_rate = if max > self.avg_max {
+            Self::GAIN_ATTACK
+        } else {
+            Self::GAIN_RELEASE
+        };
+        self.avg_max = lerp(self.avg_max, max, rate(gain_rate, dt));
 
         let bar_rate = rate(Self::BAR_RATE, dt);
+        let gain = Self::HEADROOM / self.avg_max;
         for (s, &m) in self.smoothed.iter_mut().zip(mags) {
-            *s = lerp(*s, m / self.avg_max, bar_rate);
+            *s = lerp(*s, (m * gain).min(1.0), bar_rate);
         }
 
         // Three-tap blur across neighbouring bands.
@@ -94,7 +105,9 @@ mod tests {
             s.update(&loud, DT);
         }
         assert!(
-            s.bars().iter().all(|&b| (b - 1.0).abs() < 0.05),
+            s.bars()
+                .iter()
+                .all(|&b| (b - Smoother::HEADROOM).abs() < 0.05),
             "{:?}",
             s.bars()
         );
@@ -128,6 +141,21 @@ mod tests {
         for (a, b) in at60.bars().iter().zip(at120.bars()) {
             assert!((a - b).abs() < 0.05, "{a} vs {b}");
         }
+    }
+
+    #[test]
+    fn transients_stay_inside_the_window() {
+        let mut s = Smoother::new(4);
+        for _ in 0..300 {
+            s.update(&[0.05; 4], DT);
+        }
+        // A sudden jump to 20x louder.
+        for _ in 0..60 {
+            s.update(&[1.0; 4], DT);
+            assert!(s.bars().iter().chain(s.peaks()).all(|&h| h <= 1.0));
+        }
+        // And the gain settles back to the headroom level.
+        assert!((s.bars()[0] - Smoother::HEADROOM).abs() < 0.05);
     }
 
     #[test]
