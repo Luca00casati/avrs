@@ -1,0 +1,10 @@
+[package]
+name = "av-core"
+version = "0.1.0"
+description = "Audio analysis and visual shaping shared by the av server and clients"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+realfft = "3.5.0"
