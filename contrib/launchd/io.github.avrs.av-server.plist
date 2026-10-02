@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  launchd agent for av-server (macOS).
+    cp contrib/launchd/io.github.avrs.av-server.plist ~/Library/LaunchAgents/
+    launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/io.github.avrs.av-server.plist
+  Capturing system audio needs macOS 14.6+; macOS asks for permission to
+  record system audio the first time.
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>io.github.avrs.av-server</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/sh</string>
+        <string>-c</string>
+        <string>exec "$HOME/.cargo/bin/av-server"</string>
+    </array>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <dict>
+        <key>SuccessfulExit</key>
+        <false/>
+    </dict>
+</dict>
+</plist>

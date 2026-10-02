@@ -12,7 +12,7 @@ av-core.workspace = true
 cpal = "0.18.2"
 rtrb = "0.4.0"
 rubato = "4.0.0"
-symphonia = { version = "0.6.1", features = ["mp3", "aac", "isomp4", "alac"] }
+symphonia = { version = "0.6.1", features = ["mp3", "aac", "isomp4", "alac", "aiff", "caf"] }
 
 # The PulseAudio host (pure Rust, also works on PipeWire via pipewire-pulse)
 # exposes monitor sources, which is how we capture "what's playing" on Linux.

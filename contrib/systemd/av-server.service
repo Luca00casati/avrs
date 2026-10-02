@@ -1,0 +1,18 @@
+# systemd user unit for av-server.
+#   make install-service        (or copy to ~/.config/systemd/user/ and run
+#   systemctl --user daemon-reload && systemctl --user enable --now av-server)
+#
+# Without arguments av-server visualizes what the default output is playing.
+# Add files or --source to ExecStart, or set [server] in config.toml.
+
+[Unit]
+Description=avrs audio spectrum server
+After=pipewire-pulse.service pulseaudio.service
+
+[Service]
+ExecStart=%h/.cargo/bin/av-server
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=default.target
