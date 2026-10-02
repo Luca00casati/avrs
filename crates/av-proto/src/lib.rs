@@ -4,6 +4,10 @@
 //! prefix. On connect the server sends [`ServerMsg::Hello`]; clients must
 //! check [`PROTOCOL_VERSION`] before using anything else.
 
+mod config;
+
+pub use config::{Config, ServerConfig, VizConfig};
+
 use std::io::{self, Read, Write};
 use std::path::PathBuf;
 
@@ -100,15 +104,17 @@ enum AddrKind {
 }
 
 impl SocketAddr {
-    /// The socket location: `explicit`, else `$AVRS_SOCKET`, else the default.
+    /// The socket location, from the first of: `cli` (a `--socket` flag),
+    /// `$AVRS_SOCKET`, `configured` (the config file), or the default:
     ///
     /// - Unix: `$XDG_RUNTIME_DIR/avrs.sock` (private to the user), falling back
     ///   to `avrs-$USER.sock` in the temp directory.
     /// - Windows: the named pipe `\\.\pipe\avrs-%USERNAME%`.
-    pub fn resolve(explicit: Option<&str>) -> Self {
-        match explicit
+    pub fn resolve(cli: Option<&str>, configured: Option<&str>) -> Self {
+        match cli
             .map(str::to_owned)
             .or_else(|| std::env::var(SOCKET_ENV).ok())
+            .or_else(|| configured.map(str::to_owned))
         {
             Some(s) if cfg!(windows) => Self::namespaced(s.trim_start_matches(r"\\.\pipe\")),
             Some(s) => Self::path(PathBuf::from(s)),
@@ -224,7 +230,7 @@ mod tests {
 
     #[test]
     fn explicit_socket_wins() {
-        let addr = SocketAddr::resolve(Some("x.sock"));
+        let addr = SocketAddr::resolve(Some("x.sock"), Some("ignored.sock"));
         if cfg!(windows) {
             assert_eq!(addr.to_string(), r"\\.\pipe\x.sock");
         } else {

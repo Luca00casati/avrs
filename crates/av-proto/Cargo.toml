@@ -1,12 +1,15 @@
 [package]
 name = "av-proto"
 version = "0.1.0"
-description = "Wire protocol between av-server and its clients"
+description = "Shared plumbing for av-server and its clients: protocol, socket location, config"
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+anyhow = "1.0.104"
+directories = "6.0.0"
 interprocess = "2.4.4"
 postcard = { version = "1.1.3", features = ["use-std"] }
 serde = { version = "1.0.229", features = ["derive"] }
+toml = "1.1.6"

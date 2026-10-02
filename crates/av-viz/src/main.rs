@@ -15,7 +15,7 @@ use std::time::Instant;
 use anyhow::Result;
 use av_audio::{Engine, Source};
 use av_core::{Hsv, Smoother};
-use av_proto::SocketAddr;
+use av_proto::{Config, SocketAddr, VizConfig};
 use winit::application::ApplicationHandler;
 use winit::dpi::LogicalSize;
 use winit::event::{ElementState, KeyEvent, WindowEvent};
@@ -63,10 +63,12 @@ struct Args {
     /// Defaults to $AVRS_SOCKET, else a per-user location.
     #[arg(long)]
     socket: Option<String>,
+
+    /// Config file [default: the per-user avrs/config.toml].
+    #[arg(long)]
+    config: Option<PathBuf>,
 }
 
-/// Hue drift in degrees per second, as in the C version.
-const HUE_SPEED: f32 = 10.0;
 /// Longest frame step fed to the simulation, so a stall doesn't cause a jump.
 const MAX_DT: f32 = 0.1;
 
@@ -76,6 +78,8 @@ struct App {
     smoother: Smoother,
     mags: Vec<f32>,
     color: Hsv,
+    hue_speed: f32,
+    window_size: LogicalSize<f64>,
     last_frame: Instant,
     label: String,
     finished: bool,
@@ -83,13 +87,15 @@ struct App {
 }
 
 impl App {
-    fn new(feed: Feed) -> Self {
+    fn new(feed: Feed, config: &VizConfig) -> Self {
         Self {
             renderer: None,
             feed,
             smoother: Smoother::new(0),
             mags: Vec::new(),
-            color: Hsv::new(210.0, 0.7, 0.8),
+            color: Hsv::new(config.hue, config.saturation, config.brightness),
+            hue_speed: config.hue_speed,
+            window_size: LogicalSize::new(f64::from(config.width), f64::from(config.height)),
             last_frame: Instant::now(),
             label: String::new(),
             finished: false,
@@ -111,7 +117,7 @@ impl App {
             self.smoother = Smoother::new(self.mags.len());
         }
         self.smoother.update(&self.mags, dt);
-        self.color.rotate(HUE_SPEED * dt);
+        self.color.rotate(self.hue_speed * dt);
 
         self.finished = self.feed.should_exit();
         self.label.clear();
@@ -131,7 +137,7 @@ impl ApplicationHandler for App {
         }
         let attrs = Window::default_attributes()
             .with_title("av-viz")
-            .with_inner_size(LogicalSize::new(1024.0, 600.0));
+            .with_inner_size(self.window_size);
         let result = event_loop
             .create_window(attrs)
             .map_err(anyhow::Error::from)
@@ -213,9 +219,10 @@ fn main() -> Result<()> {
         return Ok(());
     }
 
-    let feed = open_feed(&args)?;
+    let config = Config::load(args.config.as_deref())?;
+    let feed = open_feed(&args, &config)?;
     let event_loop = EventLoop::new()?;
-    let mut app = App::new(feed);
+    let mut app = App::new(feed, &config.viz);
     event_loop.run_app(&mut app)?;
     match app.error {
         Some(err) => Err(err),
@@ -223,10 +230,10 @@ fn main() -> Result<()> {
     }
 }
 
-fn open_feed(args: &Args) -> Result<Feed> {
+fn open_feed(args: &Args, config: &Config) -> Result<Feed> {
     let explicit_source = args.test || !args.files.is_empty() || args.source.is_some();
     if !(explicit_source || args.local) {
-        let addr = SocketAddr::resolve(args.socket.as_deref());
+        let addr = SocketAddr::resolve(args.socket.as_deref(), config.socket.as_deref());
         match addr.connect() {
             Ok(conn) => return Ok(Feed::Remote(Remote::new(addr, conn))),
             Err(_) if args.connect => {
@@ -236,6 +243,7 @@ fn open_feed(args: &Args) -> Result<Feed> {
             Err(_) => eprintln!("no av-server on {addr}, analyzing locally"),
         }
     }
-    let source = Source::open(args.test, &args.files, args.looping, args.source.as_deref())?;
+    let device = args.source.as_deref().or(config.viz.source.as_deref());
+    let source = Source::open(args.test, &args.files, args.looping, device)?;
     Ok(Feed::Local(Box::new(Engine::new(source))))
 }

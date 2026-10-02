@@ -11,7 +11,9 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
 use av_audio::{Engine, Source};
-use av_proto::{ClientMsg, PROTOCOL_VERSION, ServerMsg, SocketAddr, Status, encode, read_msg};
+use av_proto::{
+    ClientMsg, Config, PROTOCOL_VERSION, ServerMsg, SocketAddr, Status, encode, read_msg,
+};
 use interprocess::local_socket::{ListenerOptions, Stream, prelude::*};
 
 /// Spectrum analysis server.
@@ -44,9 +46,13 @@ struct Args {
     #[arg(long)]
     socket: Option<String>,
 
-    /// Spectrum frames per second.
-    #[arg(long, default_value_t = 60, value_parser = clap::value_parser!(u32).range(1..=240))]
-    rate: u32,
+    /// Spectrum frames per second [default: 60].
+    #[arg(long, value_parser = clap::value_parser!(u32).range(1..=240))]
+    rate: Option<u32>,
+
+    /// Config file [default: the per-user avrs/config.toml].
+    #[arg(long)]
+    config: Option<PathBuf>,
 }
 
 /// Frames queued per client before new ones are dropped for it.
@@ -68,9 +74,12 @@ fn main() -> Result<()> {
         return Ok(());
     }
 
-    let addr = SocketAddr::resolve(args.socket.as_deref());
+    let config = Config::load(args.config.as_deref())?;
+    let addr = SocketAddr::resolve(args.socket.as_deref(), config.socket.as_deref());
     let listener = listen(&addr)?;
-    let source = Source::open(args.test, &args.files, args.looping, args.source.as_deref())?;
+    let device = args.source.as_deref().or(config.server.source.as_deref());
+    let source = Source::open(args.test, &args.files, args.looping, device)?;
+    let rate = args.rate.unwrap_or(config.server.rate);
     let mut engine = Engine::new(source);
 
     let running = Arc::new(AtomicBool::new(true));
@@ -86,7 +95,7 @@ fn main() -> Result<()> {
         .spawn(move || accept_loop(listener, events_tx))?;
 
     eprintln!("av-server listening on {addr}");
-    let result = serve(&mut engine, &events, args.rate, &running);
+    let result = serve(&mut engine, &events, rate, &running);
     addr.remove();
     result
 }

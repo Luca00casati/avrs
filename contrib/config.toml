@@ -1,0 +1,35 @@
+# avrs configuration. Every key is optional; command-line flags win.
+#
+# Location:
+#   Linux    ~/.config/avrs/config.toml
+#   macOS    ~/Library/Application Support/avrs/config.toml
+#   Windows  %APPDATA%\avrs\config\config.toml
+# or pass --config <file> to av-server / av-viz.
+
+# Socket the server listens on and clients connect to (a path; a pipe name
+# on Windows). The AVRS_SOCKET environment variable overrides this.
+# socket = "/run/user/1000/avrs.sock"
+
+[server]
+# Capture source when av-server is started without files, by id or part of
+# its name (see `av-server --sources`). Default: what the default output plays.
+# source = "Monitor of Built-in Audio"
+
+# Spectrum frames per second sent to clients (1-240).
+rate = 60
+
+[viz]
+# Starting bar colour (hue in degrees, saturation and brightness 0-1).
+hue = 210.0
+saturation = 0.7
+brightness = 0.8
+
+# Hue drift in degrees per second; 0 keeps the colour fixed.
+hue_speed = 10.0
+
+# Initial window size.
+width = 1024
+height = 600
+
+# Capture source when av-viz analyzes locally (--local, or no server running).
+# source = "Monitor of Built-in Audio"
