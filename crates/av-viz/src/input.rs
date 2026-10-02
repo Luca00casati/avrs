@@ -2,7 +2,7 @@
 
 use std::fmt::Write as _;
 
-use av_audio::Capture;
+use av_audio::{Capture, Player};
 
 use crate::signal::TestSignal;
 
@@ -13,6 +13,7 @@ pub enum Input {
         debt: f32,
     },
     Capture(Capture),
+    Player(Player),
 }
 
 impl Input {
@@ -45,10 +46,35 @@ impl Input {
                     out.truncate(start);
                 }
             }
+            // A paused player stops producing samples by itself.
+            Self::Player(player) => player.drain(out),
         }
     }
 
-    pub fn describe(&self, out: &mut String) {
+    pub fn set_paused(&mut self, paused: bool) {
+        if let Self::Player(player) = self {
+            player.set_paused(paused);
+        }
+    }
+
+    pub fn next(&mut self) {
+        if let Self::Player(player) = self {
+            player.next();
+        }
+    }
+
+    pub fn previous(&mut self) {
+        if let Self::Player(player) = self {
+            player.previous();
+        }
+    }
+
+    /// The playlist has ended; the visualizer should close, like the C version.
+    pub fn is_finished(&self) -> bool {
+        matches!(self, Self::Player(player) if player.is_finished())
+    }
+
+    pub fn describe(&mut self, out: &mut String) {
         match self {
             Self::Test { signal, .. } => {
                 let _ = write!(out, "test signal: {:.0} Hz", signal.frequency());
@@ -57,6 +83,12 @@ impl Input {
                 out.push_str(capture.name());
                 if capture.has_failed() {
                     out.push_str("  (stream error)");
+                }
+            }
+            Self::Player(player) => {
+                let _ = write!(out, "playing: {}", player.title());
+                if player.has_failed() {
+                    out.push_str("  (output error)");
                 }
             }
         }

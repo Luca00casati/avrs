@@ -1,17 +1,18 @@
 //! av-viz: spectrum visualizer window.
 //!
-//! Captures system audio (or a chosen source) and draws its spectrum. File
-//! playback and the server connection come in later phases.
+//! Plays files, or captures system audio (or a chosen source), and draws the
+//! spectrum. The server connection comes in a later phase.
 
 mod input;
 mod render;
 mod signal;
 
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
 
 use anyhow::Result;
-use av_audio::Capture;
+use av_audio::{Capture, Player};
 use av_core::{Analyzer, DEFAULT_BANDS, DEFAULT_FFT_SIZE, Hsv, Smoother};
 use winit::application::ApplicationHandler;
 use winit::dpi::LogicalSize;
@@ -27,6 +28,14 @@ use render::{Renderer, Scene};
 #[derive(clap::Parser)]
 #[command(version)]
 struct Args {
+    /// Audio files or directories to play. Without any, captures audio instead.
+    #[arg(conflicts_with_all = ["source", "test"])]
+    files: Vec<PathBuf>,
+
+    /// Repeat the playlist forever.
+    #[arg(short, long = "loop", requires = "files")]
+    looping: bool,
+
     /// Audio source to capture, by id or part of its name.
     /// Defaults to what the default output device is playing.
     #[arg(short, long, conflicts_with = "test")]
@@ -57,6 +66,7 @@ struct App {
     paused: bool,
     last_frame: Instant,
     label: String,
+    finished: bool,
     error: Option<anyhow::Error>,
 }
 
@@ -73,6 +83,7 @@ impl App {
             paused: false,
             last_frame: Instant::now(),
             label: String::new(),
+            finished: false,
             error: None,
         }
     }
@@ -91,6 +102,10 @@ impl App {
         self.analyzer.analyze(&mut self.mags);
         self.smoother.update(&self.mags, dt);
         self.color.rotate(HUE_SPEED * dt);
+
+        if self.input.is_finished() {
+            self.finished = true;
+        }
 
         self.label.clear();
         self.input.describe(&mut self.label);
@@ -141,7 +156,14 @@ impl ApplicationHandler for App {
                 ..
             } => match logical_key {
                 Key::Named(NamedKey::Escape) => event_loop.exit(),
-                Key::Named(NamedKey::Space) => self.paused = !self.paused,
+                Key::Named(NamedKey::Space) => {
+                    self.paused = !self.paused;
+                    self.input.set_paused(self.paused);
+                }
+                Key::Named(NamedKey::ArrowRight) => self.input.next(),
+                Key::Named(NamedKey::ArrowLeft) => self.input.previous(),
+                Key::Character(c) if c.eq_ignore_ascii_case("n") => self.input.next(),
+                Key::Character(c) if c.eq_ignore_ascii_case("p") => self.input.previous(),
                 _ => {}
             },
             WindowEvent::Resized(size) => {
@@ -156,6 +178,10 @@ impl ApplicationHandler for App {
             }
             WindowEvent::RedrawRequested => {
                 self.update();
+                if self.finished {
+                    event_loop.exit();
+                    return;
+                }
                 let Some(renderer) = &mut self.renderer else {
                     return;
                 };
@@ -188,6 +214,9 @@ fn main() -> Result<()> {
 
     let input = if args.test {
         Input::test()
+    } else if !args.files.is_empty() {
+        let playlist = av_audio::collect_playlist(&args.files)?;
+        Input::Player(Player::new(playlist, args.looping)?)
     } else {
         Input::Capture(Capture::open(args.source.as_deref())?)
     };
