@@ -1,19 +1,21 @@
 //! av-viz: spectrum visualizer window.
 //!
-//! Plays files, or captures system audio (or a chosen source), and draws the
-//! spectrum. The server connection comes in a later phase.
+//! By default it shows what a running `av-server` streams, falling back to
+//! analyzing audio in-process when no server is up. Giving files, `--source`
+//! or `--test` always runs locally.
 
-mod input;
+mod feed;
+mod remote;
 mod render;
-mod signal;
 
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
 
 use anyhow::Result;
-use av_audio::{Capture, Player};
-use av_core::{Analyzer, DEFAULT_BANDS, DEFAULT_FFT_SIZE, Hsv, Smoother};
+use av_audio::{Engine, Source};
+use av_core::{Hsv, Smoother};
+use av_proto::SocketAddr;
 use winit::application::ApplicationHandler;
 use winit::dpi::LogicalSize;
 use winit::event::{ElementState, KeyEvent, WindowEvent};
@@ -21,33 +23,46 @@ use winit::event_loop::{ActiveEventLoop, EventLoop};
 use winit::keyboard::{Key, NamedKey};
 use winit::window::{Window, WindowId};
 
-use input::Input;
+use feed::Feed;
+use remote::Remote;
 use render::{Renderer, Scene};
 
 /// Spectrum visualizer.
 #[derive(clap::Parser)]
 #[command(version)]
 struct Args {
-    /// Audio files or directories to play. Without any, captures audio instead.
-    #[arg(conflicts_with_all = ["source", "test"])]
+    /// Audio files or directories to play locally.
+    #[arg(conflicts_with_all = ["source", "test", "connect"])]
     files: Vec<PathBuf>,
 
     /// Repeat the playlist forever.
     #[arg(short, long = "loop", requires = "files")]
     looping: bool,
 
-    /// Audio source to capture, by id or part of its name.
-    /// Defaults to what the default output device is playing.
-    #[arg(short, long, conflicts_with = "test")]
+    /// Audio source to capture locally, by id or part of its name.
+    #[arg(short, long, conflicts_with_all = ["test", "connect"])]
     source: Option<String>,
 
     /// List capturable audio sources and exit.
     #[arg(long)]
     sources: bool,
 
-    /// Use a built-in test sweep instead of capturing audio.
-    #[arg(long)]
+    /// Use a built-in test sweep instead of real audio.
+    #[arg(long, conflicts_with = "connect")]
     test: bool,
+
+    /// Analyze audio in this process, even if a server is running.
+    #[arg(long, conflicts_with = "connect")]
+    local: bool,
+
+    /// Require an av-server; wait for one instead of falling back to local.
+    #[arg(long)]
+    connect: bool,
+
+    /// Server socket (a path; a pipe name on Windows).
+    /// Defaults to $AVRS_SOCKET, else a per-user location.
+    #[arg(long)]
+    socket: Option<String>,
 }
 
 /// Hue drift in degrees per second, as in the C version.
@@ -57,13 +72,10 @@ const MAX_DT: f32 = 0.1;
 
 struct App {
     renderer: Option<Renderer>,
-    input: Input,
-    analyzer: Analyzer,
+    feed: Feed,
     smoother: Smoother,
     mags: Vec<f32>,
-    samples: Vec<f32>,
     color: Hsv,
-    paused: bool,
     last_frame: Instant,
     label: String,
     finished: bool,
@@ -71,16 +83,13 @@ struct App {
 }
 
 impl App {
-    fn new(input: Input) -> Self {
+    fn new(feed: Feed) -> Self {
         Self {
             renderer: None,
-            input,
-            analyzer: Analyzer::new(DEFAULT_FFT_SIZE, DEFAULT_BANDS),
-            smoother: Smoother::new(DEFAULT_BANDS),
-            mags: vec![0.0; DEFAULT_BANDS],
-            samples: Vec::new(),
+            feed,
+            smoother: Smoother::new(0),
+            mags: Vec::new(),
             color: Hsv::new(210.0, 0.7, 0.8),
-            paused: false,
             last_frame: Instant::now(),
             label: String::new(),
             finished: false,
@@ -96,22 +105,17 @@ impl App {
             .min(MAX_DT);
         self.last_frame = now;
 
-        self.samples.clear();
-        self.input.read(dt, self.paused, &mut self.samples);
-        self.analyzer.push(&self.samples);
-        self.analyzer.analyze(&mut self.mags);
+        self.feed.tick(dt, &mut self.mags);
+        if self.smoother.bars().len() != self.mags.len() {
+            // First frame, or a server with a different band count.
+            self.smoother = Smoother::new(self.mags.len());
+        }
         self.smoother.update(&self.mags, dt);
         self.color.rotate(HUE_SPEED * dt);
 
-        if self.input.is_finished() {
-            self.finished = true;
-        }
-
+        self.finished = self.feed.should_exit();
         self.label.clear();
-        self.input.describe(&mut self.label);
-        if self.paused {
-            self.label.push_str("  (paused)");
-        }
+        self.feed.describe(&mut self.label);
     }
 
     fn fail(&mut self, event_loop: &ActiveEventLoop, err: anyhow::Error) {
@@ -156,14 +160,11 @@ impl ApplicationHandler for App {
                 ..
             } => match logical_key {
                 Key::Named(NamedKey::Escape) => event_loop.exit(),
-                Key::Named(NamedKey::Space) => {
-                    self.paused = !self.paused;
-                    self.input.set_paused(self.paused);
-                }
-                Key::Named(NamedKey::ArrowRight) => self.input.next(),
-                Key::Named(NamedKey::ArrowLeft) => self.input.previous(),
-                Key::Character(c) if c.eq_ignore_ascii_case("n") => self.input.next(),
-                Key::Character(c) if c.eq_ignore_ascii_case("p") => self.input.previous(),
+                Key::Named(NamedKey::Space) => self.feed.toggle_pause(),
+                Key::Named(NamedKey::ArrowRight) => self.feed.next(),
+                Key::Named(NamedKey::ArrowLeft) => self.feed.previous(),
+                Key::Character(c) if c.eq_ignore_ascii_case("n") => self.feed.next(),
+                Key::Character(c) if c.eq_ignore_ascii_case("p") => self.feed.previous(),
                 _ => {}
             },
             WindowEvent::Resized(size) => {
@@ -212,20 +213,29 @@ fn main() -> Result<()> {
         return Ok(());
     }
 
-    let input = if args.test {
-        Input::test()
-    } else if !args.files.is_empty() {
-        let playlist = av_audio::collect_playlist(&args.files)?;
-        Input::Player(Player::new(playlist, args.looping)?)
-    } else {
-        Input::Capture(Capture::open(args.source.as_deref())?)
-    };
-
+    let feed = open_feed(&args)?;
     let event_loop = EventLoop::new()?;
-    let mut app = App::new(input);
+    let mut app = App::new(feed);
     event_loop.run_app(&mut app)?;
     match app.error {
         Some(err) => Err(err),
         None => Ok(()),
     }
+}
+
+fn open_feed(args: &Args) -> Result<Feed> {
+    let explicit_source = args.test || !args.files.is_empty() || args.source.is_some();
+    if !(explicit_source || args.local) {
+        let addr = SocketAddr::resolve(args.socket.as_deref());
+        match addr.connect() {
+            Ok(conn) => return Ok(Feed::Remote(Remote::new(addr, conn))),
+            Err(_) if args.connect => {
+                eprintln!("waiting for av-server on {addr}");
+                return Ok(Feed::Remote(Remote::waiting(addr)));
+            }
+            Err(_) => eprintln!("no av-server on {addr}, analyzing locally"),
+        }
+    }
+    let source = Source::open(args.test, &args.files, args.looping, args.source.as_deref())?;
+    Ok(Feed::Local(Box::new(Engine::new(source))))
 }

@@ -8,6 +8,7 @@ rust-version.workspace = true
 
 [dependencies]
 anyhow = "1.0.104"
+av-core.workspace = true
 cpal = "0.18.2"
 rtrb = "0.4.0"
 rubato = "4.0.0"

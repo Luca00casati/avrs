@@ -10,6 +10,7 @@ rust-version = "1.85"
 [workspace.dependencies]
 av-audio = { path = "crates/av-audio" }
 av-core = { path = "crates/av-core" }
+av-proto = { path = "crates/av-proto" }
 
 [profile.release]
 lto = "thin"
