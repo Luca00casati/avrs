@@ -8,6 +8,10 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, bail};
 use serde::Deserialize;
 
+/// Allowed range for `viz.bars`.
+const MIN_BARS: usize = 8;
+const MAX_BARS: usize = 256;
+
 /// Largest `delay_ms` adjustment accepted, either way.
 pub const MAX_DELAY_MS: i32 = 2000;
 
@@ -45,14 +49,10 @@ impl Default for ServerConfig {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct VizConfig {
-    /// Starting bar colour: hue in degrees.
-    pub hue: f32,
-    /// Starting bar colour: saturation, 0 to 1.
-    pub saturation: f32,
-    /// Starting bar colour: brightness, 0 to 1.
-    pub brightness: f32,
-    /// How fast the hue drifts, in degrees per second. 0 keeps it fixed.
-    pub hue_speed: f32,
+    /// Colour scheme: "ember", "aurora" or "drift".
+    pub palette: String,
+    /// Number of bars across the window.
+    pub bars: usize,
     /// Initial window size in logical pixels.
     pub width: u32,
     pub height: u32,
@@ -65,10 +65,8 @@ pub struct VizConfig {
 impl Default for VizConfig {
     fn default() -> Self {
         Self {
-            hue: 210.0,
-            saturation: 0.7,
-            brightness: 0.8,
-            hue_speed: 10.0,
+            palette: "ember".to_owned(),
+            bars: 64,
             width: 1024,
             height: 600,
             source: None,
@@ -117,8 +115,11 @@ impl Config {
             bail!("server.rate must be between 1 and 240");
         }
         let v = &self.viz;
-        if !(0.0..=1.0).contains(&v.saturation) || !(0.0..=1.0).contains(&v.brightness) {
-            bail!("viz.saturation and viz.brightness must be between 0 and 1");
+        if let Err(e) = v.palette.parse::<av_core::Palette>() {
+            bail!("viz.palette: {e}");
+        }
+        if !(MIN_BARS..=MAX_BARS).contains(&v.bars) {
+            bail!("viz.bars must be between {MIN_BARS} and {MAX_BARS}");
         }
         if v.width == 0 || v.height == 0 {
             bail!("viz.width and viz.height must be positive");
@@ -140,7 +141,8 @@ mod tests {
     fn empty_file_is_all_defaults() {
         let c = Config::parse("").unwrap();
         assert_eq!(c.server.rate, 60);
-        assert_eq!(c.viz.hue, 210.0);
+        assert_eq!(c.viz.palette, "ember");
+        assert_eq!(c.viz.bars, 64);
         assert!(c.socket.is_none());
     }
 
@@ -152,21 +154,22 @@ mod tests {
             [server]
             rate = 30
             [viz]
-            hue = 0.0
+            palette = "aurora"
             "#,
         )
         .unwrap();
         assert_eq!(c.socket.as_deref(), Some("/run/x.sock"));
         assert_eq!(c.server.rate, 30);
-        assert_eq!(c.viz.hue, 0.0);
-        assert_eq!(c.viz.saturation, 0.7);
+        assert_eq!(c.viz.palette, "aurora");
+        assert_eq!(c.viz.bars, 64);
     }
 
     #[test]
     fn rejects_typos_and_bad_values() {
-        assert!(Config::parse("[viz]\nhue_sped = 1.0").is_err());
+        assert!(Config::parse("[viz]\npallete = \"ember\"").is_err());
+        assert!(Config::parse("[viz]\npalette = \"neon\"").is_err());
+        assert!(Config::parse("[viz]\nbars = 2").is_err());
         assert!(Config::parse("[server]\nrate = 0").is_err());
-        assert!(Config::parse("[viz]\nbrightness = 2.0").is_err());
         assert!(Config::parse("[server]\ndelay_ms = 99999").is_err());
         assert_eq!(
             Config::parse("[server]\ndelay_ms = -40")

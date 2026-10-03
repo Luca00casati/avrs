@@ -1,8 +1,11 @@
-//! wgpu renderer: instanced quads for bars and peaks, glyphon for the label.
+//! wgpu renderer for the "glow bars" look: rounded gradient bars with a soft
+//! glow, a faint floor reflection and floating peak caps, all drawn as
+//! instanced signed-distance shapes; glyphon draws the label.
 
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
+use av_core::{Hsl, Palette};
 use bytemuck::{Pod, Zeroable};
 use glyphon::{
     Attrs, Buffer, Cache, Family, FontSystem, Metrics, Resolution, Shaping, SwashCache, TextArea,
@@ -14,25 +17,32 @@ use winit::window::Window;
 
 /// Everything needed to draw one frame.
 pub struct Scene<'a> {
-    /// Bar heights, 1.0 = full window height.
+    /// Bar heights, 1.0 = the full bar area.
     pub bars: &'a [f32],
     /// Peak marker heights, same scale as `bars`.
     pub peaks: &'a [f32],
-    /// sRGB-encoded bar colour.
-    pub color: [f32; 3],
+    pub palette: Palette,
+    /// Seconds since start, for palettes that change over time.
+    pub time: f32,
     pub label: &'a str,
 }
 
+/// One rounded, gradient-filled, optionally glowing rectangle (see bars.wgsl).
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
-struct Rect {
+struct Shape {
     xywh: [f32; 4],
-    rgba: [f32; 4],
+    /// Corner radius, glow radius, unused, unused.
+    params: [f32; 4],
+    top: [f32; 4],
+    bottom: [f32; 4],
+    glow: [f32; 4],
 }
 
-impl Rect {
-    const ATTRIBS: [wgpu::VertexAttribute; 2] =
-        wgpu::vertex_attr_array![0 => Float32x4, 1 => Float32x4];
+impl Shape {
+    const ATTRIBS: [wgpu::VertexAttribute; 5] = wgpu::vertex_attr_array![
+        0 => Float32x4, 1 => Float32x4, 2 => Float32x4, 3 => Float32x4, 4 => Float32x4
+    ];
 }
 
 pub struct Renderer {
@@ -45,7 +55,7 @@ pub struct Renderer {
     pipeline: wgpu::RenderPipeline,
     globals: wgpu::Buffer,
     globals_bind: wgpu::BindGroup,
-    rects: Vec<Rect>,
+    rects: Vec<Shape>,
     rect_buffer: wgpu::Buffer,
 
     text: Text,
@@ -66,13 +76,25 @@ struct Text {
 }
 
 impl Renderer {
+    // Layout, as fractions of the window height.
+    /// Where bars stand; the reflection goes below.
+    const FLOOR: f32 = 0.80;
+    /// Highest a bar reaches.
+    const CEILING: f32 = 0.08;
+    /// Share of each bar's slot that the bar fills; the rest is gap.
+    const BAR_FILL: f32 = 0.62;
+    /// Reflection length relative to its bar.
+    const REFLECTION: f32 = 0.45;
+
     // Sizes in logical pixels, scaled by the window's DPI factor.
-    const BAR_WIDTH: f32 = 3.0;
-    const PEAK_HEIGHT: f32 = 4.0;
-    const FONT_SIZE: f32 = 40.0;
-    const TEXT_MARGIN: f32 = 20.0;
-    /// The C version drew bars with alpha 180/255 over black.
-    const BAR_ALPHA: f32 = 180.0 / 255.0;
+    const GLOW_RADIUS: f32 = 16.0;
+    const PEAK_HEIGHT: f32 = 3.5;
+    const PEAK_GAP: f32 = 6.0;
+    const FONT_SIZE: f32 = 20.0;
+    const TEXT_MARGIN: f32 = 18.0;
+
+    /// Near-black stage behind the bars (sRGB).
+    const BACKGROUND: [f32; 3] = [5.0 / 255.0, 6.0 / 255.0, 9.0 / 255.0];
 
     pub async fn new(window: Arc<Window>, event_loop: &ActiveEventLoop) -> Result<Self> {
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_with_display_handle(
@@ -146,9 +168,9 @@ impl Renderer {
                 entry_point: Some("vs_main"),
                 compilation_options: Default::default(),
                 buffers: &[Some(wgpu::VertexBufferLayout {
-                    array_stride: size_of::<Rect>() as u64,
+                    array_stride: size_of::<Shape>() as u64,
                     step_mode: wgpu::VertexStepMode::Instance,
-                    attributes: &Rect::ATTRIBS,
+                    attributes: &Shape::ATTRIBS,
                 })],
             },
             primitive: wgpu::PrimitiveState {
@@ -163,7 +185,7 @@ impl Renderer {
                 compilation_options: Default::default(),
                 targets: &[Some(wgpu::ColorTargetState {
                     format: config.format,
-                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                    blend: Some(wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING),
                     write_mask: wgpu::ColorWrites::ALL,
                 })],
             }),
@@ -172,7 +194,7 @@ impl Renderer {
         });
         let rect_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("rects"),
-            contents: &[0; size_of::<Rect>()],
+            contents: &[0; size_of::<Shape>()],
             usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
         });
 
@@ -249,7 +271,7 @@ impl Renderer {
                     depth_slice: None,
                     resolve_target: None,
                     ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                        load: wgpu::LoadOp::Clear(self.clear_color()),
                         store: wgpu::StoreOp::Store,
                     },
                 })],
@@ -274,33 +296,80 @@ impl Renderer {
         Ok(())
     }
 
-    /// Lays out bars evenly across the width, like the C version.
+    /// Lays out the bars, their reflections, peak caps and the floor line.
     fn build_rects(&mut self, scene: &Scene, w: f32, h: f32) {
         let n = scene.bars.len();
-        let scale = self.window.scale_factor() as f32;
-        // Shrink bars on narrow windows so they never overlap.
-        let bar_w = (Self::BAR_WIDTH * scale).min(w / n.max(1) as f32 * 0.75);
-        let gap = (w - n as f32 * bar_w) / (n + 1) as f32;
-        let peak_h = Self::PEAK_HEIGHT * scale;
-
-        let [r, g, b] = self.output_color(scene.color);
-        let bar_rgba = [r, g, b, Self::BAR_ALPHA];
-        let white = [1.0; 4];
-
         self.rects.clear();
+        if n == 0 {
+            return;
+        }
+        let px = self.window.scale_factor() as f32;
+        let floor = h * Self::FLOOR;
+        let span = floor - h * Self::CEILING;
+        let slot = w / n as f32;
+        let bar_w = slot * Self::BAR_FILL;
+        let radius = bar_w / 2.0;
+        let glow = Self::GLOW_RADIUS * px;
+        let color_at = |i: usize| {
+            scene
+                .palette
+                .color(i as f32 / (n - 1).max(1) as f32, scene.time)
+        };
+
+        // Reflections first, so the bars' glow lies over them.
         for (i, &bar) in scene.bars.iter().enumerate() {
-            let x = gap + i as f32 * (bar_w + gap);
-            let bh = bar * h;
-            self.rects.push(Rect {
-                xywh: [x, h - bh, bar_w, bh],
-                rgba: bar_rgba,
+            let c = color_at(i);
+            let bar_h = (bar * span).max(bar_w);
+            self.rects.push(Shape {
+                xywh: [
+                    i as f32 * slot + (slot - bar_w) / 2.0,
+                    floor + 3.0 * px,
+                    bar_w,
+                    bar_h * Self::REFLECTION,
+                ],
+                params: [radius, 0.0, 0.0, 0.0],
+                top: self.rgba(c, 0.22),
+                bottom: self.rgba(c, 0.0),
+                glow: [0.0; 4],
+            });
+        }
+        self.rects.push(Shape {
+            xywh: [0.0, floor + px, w, px],
+            params: [0.0; 4],
+            top: [0.06, 0.06, 0.06, 0.06],
+            bottom: [0.06, 0.06, 0.06, 0.06],
+            glow: [0.0; 4],
+        });
+        for (i, &bar) in scene.bars.iter().enumerate() {
+            let c = color_at(i);
+            let bar_h = (bar * span).max(bar_w);
+            self.rects.push(Shape {
+                xywh: [
+                    i as f32 * slot + (slot - bar_w) / 2.0,
+                    floor - bar_h,
+                    bar_w,
+                    bar_h,
+                ],
+                params: [radius, glow, 0.0, 0.0],
+                top: self.rgba(c.lighten(0.08), 1.0),
+                bottom: self.rgba(c.lighten(-0.28), 0.35),
+                glow: self.rgba(c, 0.75),
             });
         }
         for (i, &peak) in scene.peaks.iter().enumerate() {
-            let x = gap + i as f32 * (bar_w + gap);
-            self.rects.push(Rect {
-                xywh: [x, h - peak * h, bar_w, peak_h],
-                rgba: white,
+            let cap = self.rgba(color_at(i).lighten(0.22), 0.95);
+            let y = floor - (peak * span).max(bar_w) - Self::PEAK_GAP * px;
+            self.rects.push(Shape {
+                xywh: [
+                    i as f32 * slot + (slot - bar_w) / 2.0,
+                    y,
+                    bar_w,
+                    Self::PEAK_HEIGHT * px,
+                ],
+                params: [2.0 * px, 0.0, 0.0, 0.0],
+                top: cap,
+                bottom: cap,
+                glow: [0.0; 4],
             });
         }
     }
@@ -324,6 +393,22 @@ impl Renderer {
             srgb.map(srgb_to_linear)
         } else {
             srgb
+        }
+    }
+
+    /// A palette colour with straight alpha, ready for the shader.
+    fn rgba(&self, color: Hsl, alpha: f32) -> [f32; 4] {
+        let [r, g, b] = self.output_color(color.to_rgb());
+        [r, g, b, alpha]
+    }
+
+    fn clear_color(&self) -> wgpu::Color {
+        let [r, g, b] = self.output_color(Self::BACKGROUND);
+        wgpu::Color {
+            r: f64::from(r),
+            g: f64::from(g),
+            b: f64::from(b),
+            a: 1.0,
         }
     }
 }
@@ -417,7 +502,7 @@ impl Text {
                     right: w as i32,
                     bottom: h as i32,
                 },
-                default_color: glyphon::Color::rgb(255, 255, 255),
+                default_color: glyphon::Color::rgba(232, 228, 222, 190),
                 custom_glyphs: &[],
             }],
             &mut self.swash_cache,

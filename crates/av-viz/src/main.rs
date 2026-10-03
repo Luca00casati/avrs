@@ -14,7 +14,7 @@ use std::time::Instant;
 
 use anyhow::Result;
 use av_audio::{Engine, Source};
-use av_core::{Hsv, Smoother};
+use av_core::{Palette, Smoother, pool_max};
 use av_proto::{Config, SocketAddr, VizConfig};
 use winit::application::ApplicationHandler;
 use winit::dpi::LogicalSize;
@@ -87,8 +87,10 @@ struct App {
     feed: Feed,
     smoother: Smoother,
     mags: Vec<f32>,
-    color: Hsv,
-    hue_speed: f32,
+    /// Band magnitudes reduced to one per bar.
+    bar_mags: Vec<f32>,
+    palette: Palette,
+    started: Instant,
     window_size: LogicalSize<f64>,
     last_frame: Instant,
     label: String,
@@ -104,10 +106,11 @@ impl App {
         Self {
             renderer: None,
             feed,
-            smoother: Smoother::new(0),
+            smoother: Smoother::new(config.bars),
             mags: Vec::new(),
-            color: Hsv::new(config.hue, config.saturation, config.brightness),
-            hue_speed: config.hue_speed,
+            bar_mags: vec![0.0; config.bars],
+            palette: config.palette.parse().unwrap_or_default(),
+            started: Instant::now(),
             window_size: LogicalSize::new(f64::from(config.width), f64::from(config.height)),
             last_frame: Instant::now(),
             label: String::new(),
@@ -127,12 +130,12 @@ impl App {
         self.last_frame = now;
 
         self.feed.tick(dt, &mut self.mags);
-        if self.smoother.bars().len() != self.mags.len() {
-            // First frame, or a server with a different band count.
-            self.smoother = Smoother::new(self.mags.len());
+        if !self.mags.is_empty() {
+            pool_max(&self.mags, &mut self.bar_mags);
+        } else {
+            self.bar_mags.fill(0.0);
         }
-        self.smoother.update(&self.mags, dt);
-        self.color.rotate(self.hue_speed * dt);
+        self.smoother.update(&self.bar_mags, dt);
 
         self.finished = self.feed.should_exit();
         self.label.clear();
@@ -225,7 +228,8 @@ impl ApplicationHandler for App {
                 let scene = Scene {
                     bars: self.smoother.bars(),
                     peaks: self.smoother.peaks(),
-                    color: self.color.to_rgb(),
+                    palette: self.palette,
+                    time: self.started.elapsed().as_secs_f32(),
                     label: &self.label,
                 };
                 if let Err(err) = renderer.render(&scene) {

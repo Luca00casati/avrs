@@ -2,14 +2,14 @@
 //!
 //! - [`Analyzer`] turns a stream of mono samples into log-spaced band magnitudes.
 //! - [`Smoother`] turns band magnitudes into normalized bar and peak heights.
-//! - [`Hsv`] holds the colour model used for the bars.
+//! - [`Palette`] and [`Hsl`] colour the bars.
 
 mod analyzer;
 mod color;
 mod smoother;
 
-pub use analyzer::{Analyzer, downmix};
-pub use color::Hsv;
+pub use analyzer::{Analyzer, downmix, pool_max};
+pub use color::{Hsl, Palette};
 pub use smoother::Smoother;
 
 /// Default FFT length, matching the original C visualizer.

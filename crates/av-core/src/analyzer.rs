@@ -128,6 +128,20 @@ pub fn downmix(interleaved: &[f32], channels: usize, out: &mut Vec<f32>) {
     );
 }
 
+/// Reduces `src` to `dst.len()` bands, each the loudest of the source bands
+/// it covers (so a narrow peak never disappears between display bars).
+pub fn pool_max(src: &[f32], dst: &mut [f32]) {
+    let (n, m) = (src.len(), dst.len());
+    for (i, d) in dst.iter_mut().enumerate() {
+        let a = i * n / m;
+        let b = ((i + 1) * n / m).max(a + 1).min(n);
+        *d = src[a.min(n.saturating_sub(1))..b]
+            .iter()
+            .copied()
+            .fold(0.0, f32::max);
+    }
+}
+
 fn hann(n: usize) -> Vec<f32> {
     (0..n)
         .map(|i| {
@@ -284,6 +298,22 @@ mod tests {
         whole.analyze(&mut a);
         chunked.analyze(&mut b);
         assert_eq!(a, b);
+    }
+
+    #[test]
+    fn pool_max_keeps_peaks() {
+        let src: Vec<f32> = (0..256).map(|i| if i == 77 { 1.0 } else { 0.1 }).collect();
+        let mut dst = [0.0; 64];
+        pool_max(&src, &mut dst);
+        assert_eq!(dst[77 / 4], 1.0);
+        assert_eq!(dst.iter().filter(|&&v| v == 1.0).count(), 1);
+        // Same size is a copy; more bars than bands repeats bands.
+        let mut same = [0.0; 256];
+        pool_max(&src, &mut same);
+        assert_eq!(&same[..], &src[..]);
+        let mut wide = [0.0; 300];
+        pool_max(&src[..10], &mut wide);
+        assert!(wide.iter().all(|&v| v == 0.1));
     }
 
     #[test]

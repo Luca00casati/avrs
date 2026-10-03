@@ -25,13 +25,12 @@ rate = 60
 delay_ms = 0
 
 [viz]
-# Starting bar colour (hue in degrees, saturation and brightness 0-1).
-hue = 210.0
-saturation = 0.7
-brightness = 0.8
+# Colour scheme across the spectrum: "ember" (amber to magenta), "aurora"
+# (teal to violet) or "drift" (blue to violet, slowly turning).
+palette = "ember"
 
-# Hue drift in degrees per second; 0 keeps the colour fixed.
-hue_speed = 10.0
+# Number of bars across the window (8-256).
+bars = 64
 
 # Initial window size.
 width = 1024
