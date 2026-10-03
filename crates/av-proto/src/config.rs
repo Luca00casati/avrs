@@ -8,6 +8,9 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, bail};
 use serde::Deserialize;
 
+/// Largest `delay_ms` adjustment accepted, either way.
+pub const MAX_DELAY_MS: i32 = 2000;
+
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Config {
@@ -24,6 +27,9 @@ pub struct ServerConfig {
     pub source: Option<String>,
     /// Spectrum frames per second.
     pub rate: u32,
+    /// Milliseconds added to the measured output latency (negative to
+    /// subtract), if the visuals still run ahead of or behind the sound.
+    pub delay_ms: i32,
 }
 
 impl Default for ServerConfig {
@@ -31,6 +37,7 @@ impl Default for ServerConfig {
         Self {
             source: None,
             rate: 60,
+            delay_ms: 0,
         }
     }
 }
@@ -51,6 +58,8 @@ pub struct VizConfig {
     pub height: u32,
     /// Capture source for local analysis, by id or part of its name.
     pub source: Option<String>,
+    /// Like `server.delay_ms`, for local analysis.
+    pub delay_ms: i32,
 }
 
 impl Default for VizConfig {
@@ -63,6 +72,7 @@ impl Default for VizConfig {
             width: 1024,
             height: 600,
             source: None,
+            delay_ms: 0,
         }
     }
 }
@@ -113,6 +123,11 @@ impl Config {
         if v.width == 0 || v.height == 0 {
             bail!("viz.width and viz.height must be positive");
         }
+        for (name, ms) in [("server", self.server.delay_ms), ("viz", v.delay_ms)] {
+            if !(-MAX_DELAY_MS..=MAX_DELAY_MS).contains(&ms) {
+                bail!("{name}.delay_ms must be between -{MAX_DELAY_MS} and {MAX_DELAY_MS}");
+            }
+        }
         Ok(())
     }
 }
@@ -152,6 +167,14 @@ mod tests {
         assert!(Config::parse("[viz]\nhue_sped = 1.0").is_err());
         assert!(Config::parse("[server]\nrate = 0").is_err());
         assert!(Config::parse("[viz]\nbrightness = 2.0").is_err());
+        assert!(Config::parse("[server]\ndelay_ms = 99999").is_err());
+        assert_eq!(
+            Config::parse("[server]\ndelay_ms = -40")
+                .unwrap()
+                .server
+                .delay_ms,
+            -40
+        );
     }
 
     #[test]

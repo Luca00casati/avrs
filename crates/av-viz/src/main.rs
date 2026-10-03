@@ -67,10 +67,20 @@ struct Args {
     /// Config file [default: the per-user avrs/config.toml].
     #[arg(long)]
     config: Option<PathBuf>,
+
+    /// Milliseconds to add to the measured output latency (negative to
+    /// subtract) if the visuals run ahead of or behind the sound.
+    #[arg(long, conflicts_with = "connect", allow_negative_numbers = true,
+          value_parser = clap::value_parser!(i32).range(-(av_proto::MAX_DELAY_MS as i64)..=av_proto::MAX_DELAY_MS as i64))]
+    delay_ms: Option<i32>,
 }
 
 /// Longest frame step fed to the simulation, so a stall doesn't cause a jump.
 const MAX_DT: f32 = 0.1;
+/// Step for the `[` and `]` sync keys, in ms.
+const DELAY_STEP_MS: i32 = 10;
+/// How long the delay stays in the label after adjusting it.
+const DELAY_LABEL_SECS: u64 = 4;
 
 struct App {
     renderer: Option<Renderer>,
@@ -83,6 +93,9 @@ struct App {
     last_frame: Instant,
     label: String,
     finished: bool,
+    /// Show the sync delay in the label until then.
+    show_delay_until: Option<Instant>,
+    delay_adjusted: bool,
     error: Option<anyhow::Error>,
 }
 
@@ -99,6 +112,8 @@ impl App {
             last_frame: Instant::now(),
             label: String::new(),
             finished: false,
+            show_delay_until: None,
+            delay_adjusted: false,
             error: None,
         }
     }
@@ -122,6 +137,19 @@ impl App {
         self.finished = self.feed.should_exit();
         self.label.clear();
         self.feed.describe(&mut self.label);
+        if self.show_delay_until.is_some_and(|until| now < until)
+            && let Some((total, extra)) = self.feed.delay_info()
+        {
+            use std::fmt::Write as _;
+            let _ = write!(self.label, "\nsync delay {total} ms  (delay_ms = {extra})");
+        }
+    }
+
+    fn adjust_delay(&mut self, delta_ms: i32) {
+        self.feed.adjust_delay(delta_ms);
+        self.delay_adjusted = true;
+        self.show_delay_until =
+            Some(Instant::now() + std::time::Duration::from_secs(DELAY_LABEL_SECS));
     }
 
     fn fail(&mut self, event_loop: &ActiveEventLoop, err: anyhow::Error) {
@@ -171,6 +199,8 @@ impl ApplicationHandler for App {
                 Key::Named(NamedKey::ArrowLeft) => self.feed.previous(),
                 Key::Character(c) if c.eq_ignore_ascii_case("n") => self.feed.next(),
                 Key::Character(c) if c.eq_ignore_ascii_case("p") => self.feed.previous(),
+                Key::Character(c) if c == "[" => self.adjust_delay(-DELAY_STEP_MS),
+                Key::Character(c) if c == "]" => self.adjust_delay(DELAY_STEP_MS),
                 _ => {}
             },
             WindowEvent::Resized(size) => {
@@ -224,6 +254,18 @@ fn main() -> Result<()> {
     let event_loop = EventLoop::new()?;
     let mut app = App::new(feed, &config.viz);
     event_loop.run_app(&mut app)?;
+    if app.delay_adjusted
+        && let Some((_, extra)) = app.feed.delay_info()
+    {
+        eprintln!(
+            "sync delay adjusted; to keep it, put `delay_ms = {extra}` under {} in {}",
+            app.feed.delay_config_section(),
+            args.config
+                .clone()
+                .or_else(Config::default_path)
+                .map_or("config.toml".into(), |p| p.display().to_string())
+        );
+    }
     match app.error {
         Some(err) => Err(err),
         None => Ok(()),
@@ -245,5 +287,7 @@ fn open_feed(args: &Args, config: &Config) -> Result<Feed> {
     }
     let device = args.source.as_deref().or(config.viz.source.as_deref());
     let source = Source::open(args.test, &args.files, args.looping, device)?;
-    Ok(Feed::Local(Box::new(Engine::new(source))))
+    let mut engine = Engine::new(source);
+    engine.set_extra_delay_ms(args.delay_ms.unwrap_or(config.viz.delay_ms));
+    Ok(Feed::Local(Box::new(engine)))
 }

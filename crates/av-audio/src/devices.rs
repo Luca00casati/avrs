@@ -170,3 +170,26 @@ fn default_loopback(host: &cpal::Host) -> Result<cpal::Device> {
         )
     })
 }
+
+/// Stream configs to try, in order: `config` with a fixed buffer of about
+/// `period` (clamped to what the device supports), then the device default.
+///
+/// The default can be very large: PulseAudio's is about two seconds, which
+/// delays playback controls and makes captured audio arrive in late bursts.
+pub(crate) fn low_latency_configs(
+    config: &cpal::SupportedStreamConfig,
+    period: std::time::Duration,
+) -> Vec<cpal::StreamConfig> {
+    let default: cpal::StreamConfig = config.config();
+    let frames = (f64::from(config.sample_rate()) * period.as_secs_f64()) as u32;
+    match *config.buffer_size() {
+        cpal::SupportedBufferSize::Range { min, max } if min <= max => {
+            let fixed = cpal::StreamConfig {
+                buffer_size: cpal::BufferSize::Fixed(frames.clamp(min, max)),
+                ..default
+            };
+            vec![fixed, default]
+        }
+        _ => vec![default],
+    }
+}

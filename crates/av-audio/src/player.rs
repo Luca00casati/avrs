@@ -22,6 +22,8 @@ use cpal::{FromSample, SampleFormat, SizedSample};
 
 use crate::convert::Converter;
 use crate::decode::Decoder;
+use crate::devices::low_latency_configs;
+use crate::sink_latency::SinkLatency;
 
 /// Extensions treated as audio when expanding directories.
 const AUDIO_EXTENSIONS: &[&str] = &[
@@ -29,6 +31,8 @@ const AUDIO_EXTENSIONS: &[&str] = &[
 ];
 /// Audio queued ahead of the output.
 const QUEUE_SECS: f32 = 0.5;
+/// Requested output callback period.
+const OUTPUT_PERIOD: Duration = Duration::from_millis(20);
 /// How long the decoder sleeps when the queue is full.
 const BACKOFF: Duration = Duration::from_millis(5);
 
@@ -82,6 +86,9 @@ struct Shared {
     /// The decoder reached the end of the playlist.
     exhausted: AtomicBool,
     failed: AtomicBool,
+    /// Time from the output callback until its audio is heard, in microseconds,
+    /// as reported by the backend (includes e.g. Bluetooth transport).
+    latency_us: AtomicU64,
     /// `(queued frame, track)` where each track starts, oldest first.
     starts: Mutex<VecDeque<(u64, usize)>>,
 }
@@ -98,6 +105,7 @@ pub struct Player {
     current: usize,
     looping: bool,
     sample_rate: u32,
+    sink_latency: SinkLatency,
 }
 
 impl Player {
@@ -113,21 +121,35 @@ impl Player {
             .context("no usable output config")?;
         let sample_rate = config.sample_rate();
         let channels = usize::from(config.channels());
+        let sink_latency = match device.id() {
+            Ok(id) => SinkLatency::for_sink(id.host(), id.id()),
+            Err(_) => SinkLatency::none(),
+        };
 
         let queue_len = (sample_rate as f32 * QUEUE_SECS) as usize * channels;
-        let (queue_tx, queue_rx) = rtrb::RingBuffer::new(queue_len);
-        let (tap_tx, tap_rx) = rtrb::RingBuffer::new(sample_rate as usize);
         let shared = Arc::new(Shared::default());
 
-        let stream = build_output(
-            &device,
-            config.sample_format(),
-            config.into(),
-            channels,
-            queue_rx,
-            tap_tx,
-            shared.clone(),
-        )?;
+        // A short device buffer keeps pause and track changes immediate and
+        // the reported latency honest; fall back to the default if refused.
+        let mut attempt = Err(anyhow::anyhow!("no stream config to try"));
+        for stream_config in low_latency_configs(&config, OUTPUT_PERIOD) {
+            let (queue_tx, queue_rx) = rtrb::RingBuffer::new(queue_len);
+            let (tap_tx, tap_rx) = rtrb::RingBuffer::new(sample_rate as usize);
+            attempt = build_output(
+                &device,
+                config.sample_format(),
+                stream_config,
+                channels,
+                queue_rx,
+                tap_tx,
+                shared.clone(),
+            )
+            .map(|stream| (stream, queue_tx, tap_rx));
+            if attempt.is_ok() {
+                break;
+            }
+        }
+        let (stream, queue_tx, tap_rx) = attempt?;
         stream.play().context("failed to start output stream")?;
 
         let (commands, rx) = mpsc::channel();
@@ -156,6 +178,7 @@ impl Player {
             current: 0,
             looping,
             sample_rate,
+            sink_latency,
         })
     }
 
@@ -242,6 +265,14 @@ impl Player {
         self.shared.exhausted.load(Ordering::Acquire)
             && self.shared.consumed.load(Ordering::Acquire)
                 >= self.shared.queued.load(Ordering::Acquire)
+    }
+
+    /// How long after being tapped for analysis the audio is actually heard:
+    /// what the backend reports, plus any delay the sink is known to hide
+    /// (e.g. Bluetooth headsets without delay reporting).
+    pub fn output_latency(&self) -> Duration {
+        Duration::from_micros(self.shared.latency_us.load(Ordering::Relaxed))
+            + self.sink_latency.unreported()
     }
 
     /// Whether the output stream reported an error (for example, the device went away).
@@ -489,7 +520,13 @@ where
     let error_shared = shared.clone();
     device.build_output_stream::<T, _, _>(
         config,
-        move |out: &mut [T], _| {
+        move |out: &mut [T], info: &cpal::OutputCallbackInfo| {
+            let ts = info.timestamp();
+            let latency = ts.playback.saturating_duration_since(ts.callback);
+            shared
+                .latency_us
+                .store(latency.as_micros() as u64, Ordering::Relaxed);
+
             // Discard everything queued if the decoder asked for a flush.
             let req = shared.flush_req.load(Ordering::Acquire);
             if shared.flush_ack.load(Ordering::Relaxed) != req {

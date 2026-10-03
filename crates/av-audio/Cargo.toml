@@ -18,3 +18,6 @@ symphonia = { version = "0.6.1", features = ["mp3", "aac", "isomp4", "alac", "ai
 # exposes monitor sources, which is how we capture "what's playing" on Linux.
 [target.'cfg(target_os = "linux")'.dependencies]
 cpal = { version = "0.18.2", features = ["pulseaudio"] }
+# Reads a monitored sink's output latency, to sync the visuals with what is heard.
+pollster = "1.0.1"
+pulseaudio = "0.3.1"

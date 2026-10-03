@@ -27,7 +27,8 @@ av-viz --source "headphones" # capture a specific device
 av-viz --sources             # list capturable devices
 ```
 
-Keys: **Space** pause, **N**/**→** next track, **P**/**←** previous, **Esc** quit.
+Keys: **Space** pause, **N**/**→** next track, **P**/**←** previous,
+**[**/**]** sync delay −/+10 ms, **Esc** quit.
 
 With a server:
 
@@ -42,6 +43,15 @@ server it analyzes audio itself. Files, `--source` and `--test` always run
 locally; `--local` and `--connect` force one mode.
 
 Formats: WAV, MP3, FLAC, Ogg Vorbis, AAC/M4A, ALAC, AIFF, CAF.
+
+## Audio/visual sync
+
+The visuals are delayed by the output latency so they match what you hear.
+avrs uses the latency the system reports. On Linux, Bluetooth headphones
+usually report none, so 200 ms is assumed for them. If the bars still lead or
+trail the sound, press **[** or **]** in `av-viz` until they line up, then save
+the `delay_ms` value it shows in the config file (under `[server]` when
+connected to a server, `[viz]` otherwise).
 
 ## Configure
 

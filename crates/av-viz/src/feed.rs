@@ -46,6 +46,36 @@ impl Feed {
         }
     }
 
+    /// Shifts the audio/visual sync delay by `delta_ms`.
+    pub fn adjust_delay(&mut self, delta_ms: i32) {
+        match self {
+            Self::Local(engine) => engine.adjust_extra_delay_ms(delta_ms),
+            Self::Remote(remote) => remote.send(ClientMsg::AdjustDelay(delta_ms)),
+        }
+    }
+
+    /// `(total delay, user adjustment)` in ms, if known.
+    pub fn delay_info(&self) -> Option<(u32, i32)> {
+        match self {
+            Self::Local(engine) => {
+                Some((engine.delay().as_millis() as u32, engine.extra_delay_ms()))
+            }
+            Self::Remote(remote) if remote.is_connected() => {
+                let status = remote.status();
+                Some((status.delay_ms, status.extra_delay_ms))
+            }
+            Self::Remote(_) => None,
+        }
+    }
+
+    /// The config section that `delay_ms` should be saved in for this feed.
+    pub fn delay_config_section(&self) -> &'static str {
+        match self {
+            Self::Local(_) => "[viz]",
+            Self::Remote(_) => "[server]",
+        }
+    }
+
     /// A local playlist has ended; the window closes like the C version.
     /// A server keeps running, so remote clients stay open.
     pub fn should_exit(&self) -> bool {

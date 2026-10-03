@@ -53,6 +53,12 @@ struct Args {
     /// Config file [default: the per-user avrs/config.toml].
     #[arg(long)]
     config: Option<PathBuf>,
+
+    /// Milliseconds to add to the measured output latency (negative to
+    /// subtract) if the visuals run ahead of or behind the sound.
+    #[arg(long, allow_negative_numbers = true,
+          value_parser = clap::value_parser!(i32).range(-(av_proto::MAX_DELAY_MS as i64)..=av_proto::MAX_DELAY_MS as i64))]
+    delay_ms: Option<i32>,
 }
 
 /// Frames queued per client before new ones are dropped for it.
@@ -81,6 +87,7 @@ fn main() -> Result<()> {
     let source = Source::open(args.test, &args.files, args.looping, device)?;
     let rate = args.rate.unwrap_or(config.server.rate);
     let mut engine = Engine::new(source);
+    engine.set_extra_delay_ms(args.delay_ms.unwrap_or(config.server.delay_ms));
 
     let running = Arc::new(AtomicBool::new(true));
     {
@@ -185,6 +192,7 @@ fn serve(
     let mut status = current_status(engine);
     let mut status_frame: Frame = encode(&ServerMsg::Status(status.clone()))?.into();
     let mut seq = 0u64;
+    let mut logged_delay_ms: Option<u128> = None;
     let mut last = Instant::now();
     let mut next_tick = last + period;
 
@@ -206,6 +214,10 @@ fn serve(
                     ClientMsg::SetPaused(paused) => engine.set_paused(paused),
                     ClientMsg::Next => engine.next(),
                     ClientMsg::Previous => engine.previous(),
+                    ClientMsg::AdjustDelay(ms) => {
+                        engine.adjust_extra_delay_ms(ms);
+                        eprintln!("delay adjusted: delay_ms = {}", engine.extra_delay_ms());
+                    }
                 },
                 Err(RecvTimeoutError::Timeout) => break,
                 Err(RecvTimeoutError::Disconnected) => bail!("accept thread stopped"),
@@ -218,13 +230,14 @@ fn serve(
         // Don't try to catch up after a stall; just keep the cadence.
         next_tick = (next_tick + period).max(now);
 
-        let mags = engine.tick(dt);
+        let mags = engine.tick(dt).to_vec();
+        let delay_ms = engine.delay().as_millis();
+        if logged_delay_ms.is_none_or(|old| old.abs_diff(delay_ms) >= 20) {
+            eprintln!("output latency compensation: {delay_ms} ms");
+            logged_delay_ms = Some(delay_ms);
+        }
         seq += 1;
-        let spectrum: Frame = encode(&ServerMsg::Spectrum {
-            seq,
-            mags: mags.to_vec(),
-        })?
-        .into();
+        let spectrum: Frame = encode(&ServerMsg::Spectrum { seq, mags })?.into();
 
         let new_status = current_status(engine);
         // Also resend once a second, in case a full queue dropped a change.
@@ -264,5 +277,8 @@ fn current_status(engine: &mut Engine) -> Status {
         paused: engine.is_paused(),
         has_playlist: engine.has_playlist(),
         finished: engine.is_finished(),
+        // Rounded so latency jitter doesn't resend the status every tick.
+        delay_ms: (engine.delay().as_millis() as u32).div_ceil(10) * 10,
+        extra_delay_ms: engine.extra_delay_ms(),
     }
 }

@@ -14,6 +14,7 @@ mod devices;
 mod engine;
 mod player;
 mod signal;
+mod sink_latency;
 
 pub use capture::Capture;
 pub use devices::{SourceInfo, SourceKind, list_sources};

@@ -6,7 +6,7 @@
 
 mod config;
 
-pub use config::{Config, ServerConfig, VizConfig};
+pub use config::{Config, MAX_DELAY_MS, ServerConfig, VizConfig};
 
 use std::io::{self, Read, Write};
 use std::path::PathBuf;
@@ -15,7 +15,7 @@ use interprocess::local_socket::{GenericFilePath, GenericNamespaced, Name, prelu
 use serde::{Deserialize, Serialize};
 
 /// Bumped on any incompatible change to the messages below.
-pub const PROTOCOL_VERSION: u32 = 1;
+pub const PROTOCOL_VERSION: u32 = 2;
 
 /// Upper bound on a frame, so a bad peer can't make us allocate gigabytes.
 const MAX_FRAME: usize = 1 << 20;
@@ -47,6 +47,10 @@ pub struct Status {
     pub has_playlist: bool,
     /// A non-looping playlist has ended.
     pub finished: bool,
+    /// Total delay applied to sync the visuals with the sound, in ms.
+    pub delay_ms: u32,
+    /// The user's part of that delay (`delay_ms` in the config), in ms.
+    pub extra_delay_ms: i32,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -54,6 +58,8 @@ pub enum ClientMsg {
     SetPaused(bool),
     Next,
     Previous,
+    /// Shift the sync delay by this many milliseconds.
+    AdjustDelay(i32),
 }
 
 /// Encodes one message as a complete frame, ready to write.
@@ -201,6 +207,8 @@ mod tests {
                 paused: true,
                 has_playlist: true,
                 finished: false,
+                delay_ms: 230,
+                extra_delay_ms: 30,
             }),
         ];
         let mut wire = Vec::new();

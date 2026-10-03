@@ -241,6 +241,8 @@ dependencies = [
  "anyhow",
  "av-core",
  "cpal",
+ "pollster",
+ "pulseaudio",
  "rtrb",
  "rubato",
  "symphonia",

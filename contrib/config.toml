@@ -18,6 +18,12 @@
 # Spectrum frames per second sent to clients (1-240).
 rate = 60
 
+# The visuals are delayed by the output latency the system reports so they
+# match what you hear (Bluetooth sinks that report none get 200 ms). If they
+# still run ahead, raise this; if they lag, lower it. Tip: press [ and ] in
+# av-viz to adjust live; it shows the value to put here. -2000 to 2000 ms.
+delay_ms = 0
+
 [viz]
 # Starting bar colour (hue in degrees, saturation and brightness 0-1).
 hue = 210.0
@@ -33,3 +39,6 @@ height = 600
 
 # Capture source when av-viz analyzes locally (--local, or no server running).
 # source = "Monitor of Built-in Audio"
+
+# Like server.delay_ms, when av-viz analyzes locally.
+delay_ms = 0

@@ -6,10 +6,13 @@ use cpal::traits::{DeviceTrait, StreamTrait};
 use cpal::{FromSample, SampleFormat, SizedSample};
 
 use crate::SourceKind;
-use crate::devices::{display_name, find};
+use crate::devices::{display_name, find, low_latency_configs};
+use crate::sink_latency::SinkLatency;
 
 /// Seconds of audio the ring buffer can hold before samples are dropped.
 const BUFFER_SECS: u32 = 1;
+/// Requested capture fragment length.
+const CAPTURE_PERIOD: std::time::Duration = std::time::Duration::from_millis(10);
 
 /// A running capture stream that delivers mono `f32` samples.
 ///
@@ -23,6 +26,7 @@ pub struct Capture {
     sample_rate: u32,
     dropped: Arc<AtomicU64>,
     failed: Arc<AtomicBool>,
+    sink_latency: SinkLatency,
 }
 
 impl Capture {
@@ -42,23 +46,36 @@ impl Capture {
 
         let sample_rate = config.sample_rate();
         let channels = usize::from(config.channels());
-        let (tx, rx) = rtrb::RingBuffer::new((sample_rate * BUFFER_SECS) as usize);
         let dropped = Arc::new(AtomicU64::new(0));
         let failed = Arc::new(AtomicBool::new(false));
 
-        let stream = build_stream(
-            &device,
-            config.sample_format(),
-            config.into(),
-            channels,
-            tx,
-            dropped.clone(),
-            failed.clone(),
-        )
-        .with_context(|| format!("failed to open {name:?}"))?;
+        // Small fragments so audio arrives steadily; fall back to the default.
+        let mut attempt = Err(anyhow::anyhow!("no stream config to try"));
+        for stream_config in low_latency_configs(&config, CAPTURE_PERIOD) {
+            let (tx, rx) = rtrb::RingBuffer::new((sample_rate * BUFFER_SECS) as usize);
+            attempt = build_stream(
+                &device,
+                config.sample_format(),
+                stream_config,
+                channels,
+                tx,
+                dropped.clone(),
+                failed.clone(),
+            )
+            .map(|stream| (stream, rx));
+            if attempt.is_ok() {
+                break;
+            }
+        }
+        let (stream, rx) = attempt.with_context(|| format!("failed to open {name:?}"))?;
         stream
             .play()
             .with_context(|| format!("failed to start {name:?}"))?;
+
+        let sink_latency = match device.id() {
+            Ok(id) => SinkLatency::for_monitor(id.host(), id.id()),
+            Err(_) => SinkLatency::none(),
+        };
 
         Ok(Self {
             _stream: stream,
@@ -68,6 +85,7 @@ impl Capture {
             sample_rate,
             dropped,
             failed,
+            sink_latency,
         })
     }
 
@@ -97,6 +115,13 @@ impl Capture {
     /// Samples lost because [`drain`](Self::drain) was not called often enough.
     pub fn dropped(&self) -> u64 {
         self.dropped.load(Ordering::Relaxed)
+    }
+
+    /// How long after capture the audio is heard. Nonzero only for
+    /// PulseAudio/PipeWire monitor sources: the sink's reported latency, or an
+    /// estimate for Bluetooth sinks that report none.
+    pub fn output_latency(&self) -> std::time::Duration {
+        self.sink_latency.total()
     }
 
     /// Whether the stream reported an error (for example, the device went away).

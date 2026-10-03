@@ -62,6 +62,10 @@ impl Remote {
         }
     }
 
+    pub fn is_connected(&self) -> bool {
+        self.state.lock().unwrap().connected
+    }
+
     pub fn status(&self) -> Status {
         self.state.lock().unwrap().status.clone()
     }
