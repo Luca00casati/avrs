@@ -14,7 +14,7 @@ use std::time::Instant;
 
 use anyhow::Result;
 use av_audio::{Engine, Source};
-use av_core::{Palette, Smoother, pool_max};
+use av_core::{Balls, Palette, Smoother, pool_max};
 use av_proto::{Config, SocketAddr, VizConfig};
 use winit::application::ApplicationHandler;
 use winit::dpi::LogicalSize;
@@ -77,6 +77,10 @@ struct Args {
 
 /// Longest frame step fed to the simulation, so a stall doesn't cause a jump.
 const MAX_DT: f32 = 0.1;
+/// After this long without sound, the bars drop and the balls drift off.
+const SILENCE_SECS: f32 = 1.0;
+/// Levels below this count as silence.
+const SILENCE_LEVEL: f32 = 1e-3;
 /// Step for the `[` and `]` sync keys, in ms.
 const DELAY_STEP_MS: i32 = 10;
 /// How long the delay stays in the label after adjusting it.
@@ -89,6 +93,9 @@ struct App {
     mags: Vec<f32>,
     /// Band magnitudes reduced to one per bar.
     bar_mags: Vec<f32>,
+    balls: Balls,
+    /// How long the input has been silent, in seconds.
+    silent_for: f32,
     palette: Palette,
     started: Instant,
     window_size: LogicalSize<f64>,
@@ -109,6 +116,8 @@ impl App {
             smoother: Smoother::new(config.bars),
             mags: Vec::new(),
             bar_mags: vec![0.0; config.bars],
+            balls: Balls::new(config.bars, seed()),
+            silent_for: 0.0,
             palette: config.palette.parse().unwrap_or_default(),
             started: Instant::now(),
             window_size: LogicalSize::new(f64::from(config.width), f64::from(config.height)),
@@ -135,7 +144,17 @@ impl App {
         } else {
             self.bar_mags.fill(0.0);
         }
+
+        let loud = self.bar_mags.iter().any(|&m| m > SILENCE_LEVEL);
+        self.silent_for = if loud { 0.0 } else { self.silent_for + dt };
+        let idle = self.feed.is_stopped() || self.silent_for > SILENCE_SECS;
+        if idle {
+            // Let the bars fall instead of freezing them.
+            self.bar_mags.fill(0.0);
+        }
         self.smoother.update(&self.bar_mags, dt);
+        let aspect = self.renderer.as_ref().map_or(2.0, Renderer::bar_aspect);
+        self.balls.update(self.smoother.peaks(), idle, aspect, dt);
 
         self.finished = self.feed.should_exit();
         self.label.clear();
@@ -227,7 +246,7 @@ impl ApplicationHandler for App {
                 };
                 let scene = Scene {
                     bars: self.smoother.bars(),
-                    peaks: self.smoother.peaks(),
+                    balls: self.balls.balls(),
                     palette: self.palette,
                     time: self.started.elapsed().as_secs_f32(),
                     label: &self.label,
@@ -274,6 +293,13 @@ fn main() -> Result<()> {
         Some(err) => Err(err),
         None => Ok(()),
     }
+}
+
+/// A seed for the balls' drift, different on every run.
+fn seed() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(1, |d| d.as_nanos() as u64)
 }
 
 fn open_feed(args: &Args, config: &Config) -> Result<Feed> {

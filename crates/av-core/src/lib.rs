@@ -2,13 +2,16 @@
 //!
 //! - [`Analyzer`] turns a stream of mono samples into log-spaced band magnitudes.
 //! - [`Smoother`] turns band magnitudes into normalized bar and peak heights.
+//! - [`Balls`] animates the peak balls, which drift away when playback stops.
 //! - [`Palette`] and [`Hsl`] colour the bars.
 
 mod analyzer;
+mod balls;
 mod color;
 mod smoother;
 
 pub use analyzer::{Analyzer, downmix, pool_max};
+pub use balls::{Ball, Balls};
 pub use color::{Hsl, Palette};
 pub use smoother::Smoother;
 
