@@ -26,6 +26,8 @@ const UNREPORTED_BELOW: Duration = Duration::from_millis(50);
 
 pub struct SinkLatency {
     micros: Arc<AtomicU64>,
+    /// Whether the sink still exists.
+    present: Arc<AtomicBool>,
     bluetooth: bool,
     stop: Arc<AtomicBool>,
     thread: Option<JoinHandle<()>>,
@@ -36,6 +38,7 @@ impl SinkLatency {
     pub fn none() -> Self {
         Self {
             micros: Arc::new(AtomicU64::new(0)),
+            present: Arc::new(AtomicBool::new(false)),
             bluetooth: false,
             stop: Arc::new(AtomicBool::new(true)),
             thread: None,
@@ -65,16 +68,25 @@ impl SinkLatency {
         };
 
         let micros = Arc::new(AtomicU64::new(0));
+        let present = Arc::new(AtomicBool::new(true));
         let stop = Arc::new(AtomicBool::new(false));
         let thread = {
-            let (micros, stop) = (micros.clone(), stop.clone());
+            let (micros, present, stop) = (micros.clone(), present.clone(), stop.clone());
             std::thread::Builder::new()
                 .name("av-sink-latency".into())
                 .spawn(move || {
                     while !stop.load(Ordering::Relaxed) {
-                        if let Ok(info) = pollster::block_on(client.sink_info_by_name(sink.clone()))
-                        {
-                            micros.store(info.actual_latency, Ordering::Relaxed);
+                        match pollster::block_on(client.sink_info_by_name(sink.clone())) {
+                            Ok(info) => {
+                                micros.store(info.actual_latency, Ordering::Relaxed);
+                                present.store(true, Ordering::Relaxed);
+                            }
+                            // The sink went away (e.g. headphones disconnected);
+                            // whatever we were moved to is not this sink.
+                            Err(_) => {
+                                micros.store(0, Ordering::Relaxed);
+                                present.store(false, Ordering::Relaxed);
+                            }
                         }
                         std::thread::park_timeout(POLL);
                     }
@@ -82,6 +94,7 @@ impl SinkLatency {
         };
         Self {
             micros,
+            present,
             bluetooth,
             stop,
             thread: thread.ok(),
@@ -99,7 +112,10 @@ impl SinkLatency {
 
     /// Delay the sink itself does not report but very likely has.
     pub fn unreported(&self) -> Duration {
-        if self.bluetooth && self.reported() < UNREPORTED_BELOW {
+        if self.bluetooth
+            && self.present.load(Ordering::Relaxed)
+            && self.reported() < UNREPORTED_BELOW
+        {
             BLUETOOTH_ESTIMATE
         } else {
             Duration::ZERO

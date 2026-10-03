@@ -75,10 +75,12 @@ pub fn list_sources() -> Result<Vec<SourceInfo>> {
 /// With no selector, picks the default output's loopback. Otherwise matches an
 /// exact id (with or without the `host:` prefix), then an exact name, then a
 /// unique substring of the name or id, ignoring case.
-pub(crate) fn find(selector: Option<&str>) -> Result<(cpal::Device, SourceKind)> {
-    let host = cpal::default_host();
+pub(crate) fn find(
+    host: &cpal::Host,
+    selector: Option<&str>,
+) -> Result<(cpal::Device, SourceKind)> {
     let Some(selector) = selector else {
-        let device = default_loopback(&host)?;
+        let device = default_loopback(host)?;
         return Ok((device, SourceKind::Loopback));
     };
 
@@ -149,6 +151,15 @@ fn kind_of(device: &cpal::Device) -> Option<SourceKind> {
     } else {
         None
     }
+}
+
+/// Id (`host:device`) of what [`find`] picks with no selector, if anything.
+pub(crate) fn default_loopback_id(host: &cpal::Host) -> Option<String> {
+    default_loopback(host)
+        .ok()?
+        .id()
+        .ok()
+        .map(|id| id.to_string())
 }
 
 fn default_loopback(host: &cpal::Host) -> Result<cpal::Device> {
