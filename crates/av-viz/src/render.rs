@@ -97,17 +97,22 @@ impl Renderer {
     const BACKGROUND: [f32; 3] = [5.0 / 255.0, 6.0 / 255.0, 9.0 / 255.0];
 
     pub async fn new(window: Arc<Window>, event_loop: &ActiveEventLoop) -> Result<Self> {
-        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_with_display_handle(
-            Box::new(event_loop.owned_display_handle()),
-        ));
+        // WGPU_BACKEND (e.g. "gl", "vulkan") still overrides the choice below.
+        let instance =
+            wgpu::Instance::new(wgpu::InstanceDescriptor::new_with_display_handle_from_env(
+                Box::new(event_loop.owned_display_handle()),
+            ));
         let surface = instance.create_surface(window.clone())?;
-        let adapter = instance
-            .request_adapter(&wgpu::RequestAdapterOptions {
-                compatible_surface: Some(&surface),
-                ..Default::default()
-            })
+        let adapter = pick_adapter(&instance, &surface)
             .await
-            .context("no suitable GPU adapter")?;
+            .context("no graphics adapter can draw to this window")?;
+        let info = adapter.get_info();
+        if info.device_type == wgpu::DeviceType::Cpu {
+            eprintln!(
+                "av-viz: rendering in software ({}); expect high CPU use",
+                info.name
+            );
+        }
         let (device, queue) = adapter
             .request_device(&wgpu::DeviceDescriptor {
                 label: Some("av-viz"),
@@ -411,6 +416,39 @@ impl Renderer {
             a: 1.0,
         }
     }
+}
+
+/// Picks the adapter to draw with: any real GPU before a software renderer,
+/// then Vulkan/Metal/DX12 before OpenGL.
+///
+/// wgpu's own choice can land on a software rasterizer (Mesa's llvmpipe) when
+/// the GPU's Vulkan driver is missing or incomplete, as on Intel Haswell,
+/// even though OpenGL would use the GPU. Drawing every frame on the CPU costs
+/// a whole core, heats the machine and starves the audio threads.
+async fn pick_adapter(
+    instance: &wgpu::Instance,
+    surface: &wgpu::Surface<'_>,
+) -> Option<wgpu::Adapter> {
+    let rank = |info: &wgpu::AdapterInfo| {
+        let device = match info.device_type {
+            wgpu::DeviceType::DiscreteGpu => 0,
+            wgpu::DeviceType::IntegratedGpu => 1,
+            wgpu::DeviceType::VirtualGpu => 2,
+            wgpu::DeviceType::Other => 3,
+            wgpu::DeviceType::Cpu => 4,
+        };
+        let backend = match info.backend {
+            wgpu::Backend::Vulkan | wgpu::Backend::Metal | wgpu::Backend::Dx12 => 0,
+            _ => 1,
+        };
+        (device, backend)
+    };
+    instance
+        .enumerate_adapters(wgpu::Backends::all())
+        .await
+        .into_iter()
+        .filter(|a| a.is_surface_supported(surface))
+        .min_by_key(|a| rank(&a.get_info()))
 }
 
 fn srgb_to_linear(c: f32) -> f32 {
