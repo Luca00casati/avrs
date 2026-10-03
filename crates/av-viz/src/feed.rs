@@ -76,18 +76,6 @@ impl Feed {
         }
     }
 
-    /// Nothing is playing: paused, a server's playlist has ended, or the
-    /// server is gone. (Silence is detected separately, from the levels.)
-    pub fn is_stopped(&self) -> bool {
-        match self {
-            Self::Local(engine) => engine.is_paused() || engine.is_finished(),
-            Self::Remote(remote) => {
-                let status = remote.status();
-                !remote.is_connected() || status.paused || status.finished
-            }
-        }
-    }
-
     /// A local playlist has ended; the window closes like the C version.
     /// A server keeps running, so remote clients stay open.
     pub fn should_exit(&self) -> bool {

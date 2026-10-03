@@ -5,7 +5,7 @@
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
-use av_core::{Ball, Hsl, Palette};
+use av_core::{Hsl, Palette};
 use bytemuck::{Pod, Zeroable};
 use glyphon::{
     Attrs, Buffer, Cache, Family, FontSystem, Metrics, Resolution, Shaping, SwashCache, TextArea,
@@ -19,8 +19,8 @@ use winit::window::Window;
 pub struct Scene<'a> {
     /// Bar heights, 1.0 = the full bar area.
     pub bars: &'a [f32],
-    /// Peak balls; heights on the same scale as `bars`.
-    pub balls: &'a [Ball],
+    /// Peak marker heights, same scale as `bars`.
+    pub peaks: &'a [f32],
     pub palette: Palette,
     /// Seconds since start, for palettes that change over time.
     pub time: f32,
@@ -88,10 +88,8 @@ impl Renderer {
 
     // Sizes in logical pixels, scaled by the window's DPI factor.
     const GLOW_RADIUS: f32 = 16.0;
-    const PEAK_GAP: f32 = 4.0;
-    const BALL_GLOW: f32 = 8.0;
-    /// Ball diameter relative to the bar width.
-    const BALL_SIZE: f32 = 0.95;
+    const PEAK_HEIGHT: f32 = 3.5;
+    const PEAK_GAP: f32 = 6.0;
     const FONT_SIZE: f32 = 20.0;
     const TEXT_MARGIN: f32 = 18.0;
 
@@ -363,25 +361,22 @@ impl Renderer {
                 glow: self.rgba(c, 0.75),
             });
         }
-        // Peak balls, keeping their bar's colour wherever they drift.
-        let d = bar_w * Self::BALL_SIZE;
-        for (i, ball) in scene.balls.iter().enumerate() {
-            let c = color_at(i).lighten(0.22);
-            let bottom = floor - (ball.y * span).max(bar_w) - Self::PEAK_GAP * px;
+        for (i, &peak) in scene.peaks.iter().enumerate() {
+            let cap = self.rgba(color_at(i).lighten(0.22), 0.95);
+            let y = floor - (peak * span).max(bar_w) - Self::PEAK_GAP * px;
             self.rects.push(Shape {
-                xywh: [ball.x * w - d / 2.0, bottom - d, d, d],
-                params: [d / 2.0, Self::BALL_GLOW * px, 0.0, 0.0],
-                top: self.rgba(c, 0.95),
-                bottom: self.rgba(c.lighten(-0.12), 0.95),
-                glow: self.rgba(c, 0.5),
+                xywh: [
+                    i as f32 * slot + (slot - bar_w) / 2.0,
+                    y,
+                    bar_w,
+                    Self::PEAK_HEIGHT * px,
+                ],
+                params: [2.0 * px, 0.0, 0.0, 0.0],
+                top: cap,
+                bottom: cap,
+                glow: [0.0; 4],
             });
         }
-    }
-
-    /// Width over height of the area bars grow in, for isotropic ball drift.
-    pub fn bar_aspect(&self) -> f32 {
-        let (w, h) = (self.config.width as f32, self.config.height as f32);
-        w / (h * (Self::FLOOR - Self::CEILING))
     }
 
     fn upload_rects(&mut self) {
