@@ -187,6 +187,8 @@ fn default_loopback(host: &cpal::Host) -> Result<cpal::Device> {
 ///
 /// The default can be very large: PulseAudio's is about two seconds, which
 /// delays playback controls and makes captured audio arrive in late bursts.
+/// Too small is also harmful: on PipeWire the smallest request sets the
+/// buffer size for every app, so callers ask for at least ~25 ms.
 pub(crate) fn low_latency_configs(
     config: &cpal::SupportedStreamConfig,
     period: std::time::Duration,

@@ -31,8 +31,10 @@ const AUDIO_EXTENSIONS: &[&str] = &[
 ];
 /// Audio queued ahead of the output.
 const QUEUE_SECS: f32 = 0.5;
-/// Requested output callback period.
-const OUTPUT_PERIOD: Duration = Duration::from_millis(20);
+/// Requested output callback period (the device buffer holds two). Like the
+/// capture period, kept above PipeWire's default quantum so playing a file
+/// doesn't shrink every other app's buffers.
+const OUTPUT_PERIOD: Duration = Duration::from_millis(50);
 /// How long the decoder sleeps when the queue is full.
 const BACKOFF: Duration = Duration::from_millis(5);
 

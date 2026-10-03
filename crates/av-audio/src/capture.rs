@@ -12,8 +12,11 @@ use crate::sink_latency::SinkLatency;
 
 /// Seconds of audio the ring buffer can hold before samples are dropped.
 const BUFFER_SECS: u32 = 1;
-/// Requested capture fragment length.
-const CAPTURE_PERIOD: Duration = Duration::from_millis(10);
+/// Requested capture fragment length. Kept above PipeWire's default graph
+/// quantum (1024 frames, ~21 ms at 48 kHz): PipeWire runs every stream at the
+/// smallest latency any one asks for, so asking for less shrinks the buffers
+/// of all other apps too and makes slower machines crackle.
+const CAPTURE_PERIOD: Duration = Duration::from_millis(25);
 
 /// A capture that delivers mono `f32` samples.
 ///
