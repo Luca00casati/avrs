@@ -52,6 +52,8 @@ pub struct Engine {
     delay: f64,
     /// Apply the next target delay immediately instead of smoothing.
     snap_delay: bool,
+    /// The capture's switch count last seen, to snap the delay on a change.
+    seen_switches: u64,
 }
 
 impl Engine {
@@ -74,6 +76,7 @@ impl Engine {
             extra_delay: 0.0,
             delay: 0.0,
             snap_delay: true,
+            seen_switches: 0,
         }
     }
 
@@ -140,6 +143,13 @@ impl Engine {
             Source::Player(player) => player.drain(&mut self.samples),
         }
 
+        if let Source::Capture(capture) = &self.source
+            && capture.switches() != self.seen_switches
+        {
+            // A different device: its latency applies at once.
+            self.seen_switches = capture.switches();
+            self.snap_delay = true;
+        }
         let target = (self.source_latency() + self.extra_delay).clamp(0.0, Self::MAX_DELAY);
         if self.snap_delay || (target - self.delay).abs() > 0.5 {
             // First reading, a user adjustment, or a device change: jump.

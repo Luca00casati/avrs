@@ -32,6 +32,8 @@ pub struct Capture {
     /// Always `Some` until dropped; see the `Drop` impl.
     live: Option<Live>,
     replacements: mpsc::Receiver<Live>,
+    /// How many times the capture has switched device or reopened.
+    switches: u64,
     stop_watcher: Arc<AtomicBool>,
     watcher: std::thread::Thread,
 }
@@ -59,11 +61,20 @@ impl Capture {
                     // per reopen: with cpal's PulseAudio host, queries on a
                     // connection that another thread opened streams on can
                     // block indefinitely.
-                    let host = cpal::default_host();
+                    let mut host = cpal::default_host();
                     while !stop.load(Ordering::Relaxed) {
                         std::thread::park_timeout(Self::CHECK_EVERY);
                         let moved = selector.is_none()
-                            && default_loopback_id(&host).is_some_and(|id| id != current_id);
+                            && match default_loopback_id(&host) {
+                                Some(id) => id != current_id,
+                                None => {
+                                    // The connection may have died (e.g. the
+                                    // audio server restarted); a dead one would
+                                    // never see another change. Reconnect.
+                                    host = cpal::default_host();
+                                    false
+                                }
+                            };
                         if !(moved || current_failed.load(Ordering::Relaxed)) {
                             continue;
                         }
@@ -86,6 +97,7 @@ impl Capture {
         Ok(Self {
             live: Some(live),
             replacements,
+            switches: 0,
             stop_watcher,
             watcher,
         })
@@ -95,6 +107,7 @@ impl Capture {
     pub fn drain(&mut self, out: &mut Vec<f32>) {
         if let Some(live) = self.replacements.try_iter().last() {
             eprintln!("capturing {}", live.name);
+            self.switches += 1;
             if let Some(old) = self.live.replace(live) {
                 close_in_background(old);
             }
@@ -118,6 +131,12 @@ impl Capture {
 
     pub fn name(&self) -> &str {
         &self.live().name
+    }
+
+    /// Counts device switches and reopens, so callers can tell when the
+    /// device (and with it the latency) may have changed.
+    pub fn switches(&self) -> u64 {
+        self.switches
     }
 
     pub fn kind(&self) -> SourceKind {
@@ -158,6 +177,23 @@ impl Drop for Capture {
     }
 }
 
+/// Starts a capture stream without waiting for it.
+///
+/// cpal's PulseAudio host starts a capture and then blocks until the server
+/// reports data flowing, which for the monitor of a silent output only
+/// happens once something plays there. Waiting on the caller's thread froze
+/// the server at startup and kept it from following output changes.
+fn start_in_background(stream: Arc<cpal::Stream>, name: String, failed: Arc<AtomicBool>) {
+    let _ = std::thread::Builder::new()
+        .name("av-capture-start".into())
+        .spawn(move || {
+            if let Err(e) = stream.play() {
+                eprintln!("failed to start {name:?}: {e}");
+                failed.store(true, Ordering::Relaxed);
+            }
+        });
+}
+
 /// Closes a stream on a throwaway thread. Closing can block (cpal's
 /// PulseAudio host waits on a pending server query), which must not stall the
 /// analysis loop or keep the process from exiting.
@@ -169,7 +205,7 @@ fn close_in_background(live: Live) {
 
 /// One open capture stream on one device.
 struct Live {
-    _stream: cpal::Stream,
+    _stream: Arc<cpal::Stream>,
     rx: rtrb::Consumer<f32>,
     device_id: String,
     name: String,
@@ -217,9 +253,8 @@ impl Live {
             }
         }
         let (stream, rx) = attempt.with_context(|| format!("failed to open {name:?}"))?;
-        stream
-            .play()
-            .with_context(|| format!("failed to start {name:?}"))?;
+        let stream = Arc::new(stream);
+        start_in_background(stream.clone(), name.clone(), failed.clone());
 
         let id = device.id().ok();
         let sink_latency = match &id {
