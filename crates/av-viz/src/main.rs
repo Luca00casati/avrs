@@ -134,12 +134,13 @@ impl App {
         self.last_frame = now;
 
         self.feed.tick(dt, &mut self.mags);
-        // Paused and the audio still in flight has played out: freeze the
-        // frame. Otherwise the auto-gain and peak caps keep drifting on the
-        // frozen spectrum.
+        // Paused and the audio still in flight has played out: the peak caps
+        // stay put and the bars drop to the floor. (Updating on the frozen
+        // spectrum would keep the auto-gain and caps drifting.)
         let frozen = self.feed.is_paused() && self.mags == self.prev_mags;
         self.prev_mags.clone_from(&self.mags);
         if frozen {
+            self.smoother.fall(dt);
             return self.update_label(now);
         }
         self.anim_time += dt;

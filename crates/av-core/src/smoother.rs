@@ -94,12 +94,7 @@ impl Smoother {
             }
         }
 
-        let side = Self::NEIGHBOUR;
-        for i in 0..n {
-            let left = self.heights[i.saturating_sub(1)];
-            let right = self.heights[(i + 1).min(n - 1)];
-            self.bars[i] = side * left + (1.0 - 2.0 * side) * self.heights[i] + side * right;
-        }
+        self.blend();
 
         for i in 0..n {
             let bar = self.bars[i];
@@ -113,6 +108,30 @@ impl Smoother {
                 self.peak_speed[i] += Self::PEAK_GRAVITY * dt;
                 self.peaks[i] = (self.peaks[i] - self.peak_speed[i] * dt).max(bar);
             }
+        }
+    }
+}
+
+impl Smoother {
+    /// The paused look: bars fall to the floor under gravity while the peak
+    /// caps stay where they are. The auto-gain is left alone, so resuming
+    /// picks up at the same level.
+    pub fn fall(&mut self, dt: f32) {
+        for (h, v) in self.heights.iter_mut().zip(&mut self.fall_speed) {
+            *v += Self::BAR_GRAVITY * dt;
+            *h = (*h - *v * dt).max(0.0);
+        }
+        self.blend();
+    }
+
+    /// Softens jagged edges by mixing each bar with its neighbours.
+    fn blend(&mut self) {
+        let n = self.heights.len();
+        let side = Self::NEIGHBOUR;
+        for i in 0..n {
+            let left = self.heights[i.saturating_sub(1)];
+            let right = self.heights[(i + 1).min(n - 1)];
+            self.bars[i] = side * left + (1.0 - 2.0 * side) * self.heights[i] + side * right;
         }
     }
 }
@@ -232,6 +251,25 @@ mod tests {
             s.update(&[0.0], DT);
         }
         assert!(s.peaks()[0] < peak);
+    }
+
+    #[test]
+    fn falling_drops_bars_and_keeps_peaks() {
+        let mut s = Smoother::new(4);
+        for _ in 0..60 {
+            s.update(&[0.5, 0.2, 0.4, 0.1], DT);
+        }
+        let peaks = s.peaks().to_vec();
+        for _ in 0..120 {
+            s.fall(DT);
+        }
+        assert!(s.bars().iter().all(|&b| b == 0.0), "{:?}", s.bars());
+        assert_eq!(s.peaks(), &peaks[..]);
+        // Resuming continues normally: bars rise, peaks follow the music again.
+        for _ in 0..30 {
+            s.update(&[0.5, 0.2, 0.4, 0.1], DT);
+        }
+        assert!(s.bars()[0] > 0.5);
     }
 
     #[test]
