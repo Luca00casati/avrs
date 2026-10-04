@@ -76,6 +76,14 @@ impl Feed {
         }
     }
 
+    /// Whether playback is paused (locally, or on the server).
+    pub fn is_paused(&self) -> bool {
+        match self {
+            Self::Local(engine) => engine.is_paused(),
+            Self::Remote(remote) => remote.status().paused,
+        }
+    }
+
     /// A local playlist has ended; the window closes like the C version.
     /// A server keeps running, so remote clients stay open.
     pub fn should_exit(&self) -> bool {

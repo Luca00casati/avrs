@@ -89,8 +89,11 @@ struct App {
     mags: Vec<f32>,
     /// Band magnitudes reduced to one per bar.
     bar_mags: Vec<f32>,
+    /// Last frame's magnitudes, to tell when a paused source has gone still.
+    prev_mags: Vec<f32>,
     palette: Palette,
-    started: Instant,
+    /// Seconds of animation shown so far; stands still while paused.
+    anim_time: f32,
     window_size: LogicalSize<f64>,
     last_frame: Instant,
     label: String,
@@ -109,8 +112,9 @@ impl App {
             smoother: Smoother::new(config.bars),
             mags: Vec::new(),
             bar_mags: vec![0.0; config.bars],
+            prev_mags: Vec::new(),
             palette: config.palette.parse().unwrap_or_default(),
-            started: Instant::now(),
+            anim_time: 0.0,
             window_size: LogicalSize::new(f64::from(config.width), f64::from(config.height)),
             last_frame: Instant::now(),
             label: String::new(),
@@ -130,6 +134,16 @@ impl App {
         self.last_frame = now;
 
         self.feed.tick(dt, &mut self.mags);
+        // Paused and the audio still in flight has played out: freeze the
+        // frame. Otherwise the auto-gain and peak caps keep drifting on the
+        // frozen spectrum.
+        let frozen = self.feed.is_paused() && self.mags == self.prev_mags;
+        self.prev_mags.clone_from(&self.mags);
+        if frozen {
+            return self.update_label(now);
+        }
+        self.anim_time += dt;
+
         if !self.mags.is_empty() {
             pool_max(&self.mags, &mut self.bar_mags);
         } else {
@@ -137,6 +151,11 @@ impl App {
         }
         self.smoother.update(&self.bar_mags, dt);
 
+        self.update_label(now);
+    }
+
+    /// Refreshes the label and whether the window should close.
+    fn update_label(&mut self, now: Instant) {
         self.finished = self.feed.should_exit();
         self.label.clear();
         self.feed.describe(&mut self.label);
@@ -229,7 +248,7 @@ impl ApplicationHandler for App {
                     bars: self.smoother.bars(),
                     peaks: self.smoother.peaks(),
                     palette: self.palette,
-                    time: self.started.elapsed().as_secs_f32(),
+                    time: self.anim_time,
                     label: &self.label,
                 };
                 if let Err(err) = renderer.render(&scene) {
