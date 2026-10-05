@@ -18,7 +18,7 @@ use av_core::{Palette, Smoother, pool_max};
 use av_proto::{Config, SocketAddr, VizConfig};
 use winit::application::ApplicationHandler;
 use winit::dpi::LogicalSize;
-use winit::event::{ElementState, KeyEvent, WindowEvent};
+use winit::event::{ElementState, KeyEvent, MouseButton, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, EventLoop};
 use winit::keyboard::{Key, NamedKey};
 use winit::window::{Window, WindowId};
@@ -77,6 +77,12 @@ struct Args {
 
 /// Longest frame step fed to the simulation, so a stall doesn't cause a jump.
 const MAX_DT: f32 = 0.1;
+/// How long the label and timeline stay after the last mouse or key activity.
+const UI_SHOW: std::time::Duration = std::time::Duration::from_millis(2500);
+/// How quickly they fade in and out (per second).
+const UI_FADE_RATE: f32 = 8.0;
+/// Seconds the arrow keys move through a track.
+const SEEK_STEP: f64 = 5.0;
 /// Step for the `[` and `]` sync keys, in ms.
 const DELAY_STEP_MS: i32 = 10;
 /// How long the delay stays in the label after adjusting it.
@@ -101,6 +107,17 @@ struct App {
     /// Show the sync delay in the label until then.
     show_delay_until: Option<Instant>,
     delay_adjusted: bool,
+    /// Show the label and timeline until then (after mouse or key activity).
+    ui_until: Instant,
+    /// Current visibility of the label and timeline, 0 to 1.
+    ui_alpha: f32,
+    last_ui_tick: Instant,
+    /// Playback progress (0 to 1) for the timeline, when playing files.
+    timeline: Option<f32>,
+    /// Where on the timeline the user is dragging to, while the button is held.
+    dragging: Option<f32>,
+    /// Mouse position in window pixels, while over the window.
+    cursor: Option<(f32, f32)>,
     error: Option<anyhow::Error>,
 }
 
@@ -121,6 +138,12 @@ impl App {
             finished: false,
             show_delay_until: None,
             delay_adjusted: false,
+            ui_until: Instant::now(),
+            ui_alpha: 0.0,
+            last_ui_tick: Instant::now(),
+            timeline: None,
+            dragging: None,
+            cursor: None,
             error: None,
         }
     }
@@ -155,16 +178,45 @@ impl App {
         self.update_label(now);
     }
 
-    /// Refreshes the label and whether the window should close.
+    /// Refreshes the label, timeline and their fade, and whether the window
+    /// should close.
     fn update_label(&mut self, now: Instant) {
+        let dt = now.duration_since(self.last_ui_tick).as_secs_f32();
+        self.last_ui_tick = now;
+        let shown = now < self.ui_until || self.dragging.is_some();
+        let target = if shown { 1.0 } else { 0.0 };
+        self.ui_alpha += (target - self.ui_alpha) * (dt * UI_FADE_RATE).min(1.0);
+
         self.finished = self.feed.should_exit();
+        let (position, duration) = (self.feed.position(), self.feed.duration());
+        self.timeline = match (position, duration) {
+            (Some(p), Some(d)) if d > 0.0 => Some(self.dragging.unwrap_or((p / d) as f32)),
+            _ => None,
+        };
         self.label.clear();
         self.feed.describe(&mut self.label);
+        if let (Some(p), Some(d)) = (position, duration) {
+            use std::fmt::Write as _;
+            let p = self.dragging.map_or(p, |f| f64::from(f) * d);
+            let _ = write!(self.label, "\n{} / {}", clock(p), clock(d));
+        }
         if self.show_delay_until.is_some_and(|until| now < until)
             && let Some((total, extra)) = self.feed.delay_info()
         {
             use std::fmt::Write as _;
             let _ = write!(self.label, "\nsync delay {total} ms  (delay_ms = {extra})");
+        }
+    }
+
+    /// Shows the label and timeline for a while.
+    fn wake_ui(&mut self) {
+        self.ui_until = Instant::now() + UI_SHOW;
+    }
+
+    /// Moves `delta` seconds through the current track.
+    fn seek_by(&mut self, delta: f64) {
+        if let Some(position) = self.feed.position() {
+            self.feed.seek(position + delta);
         }
     }
 
@@ -211,21 +263,62 @@ impl ApplicationHandler for App {
                     KeyEvent {
                         logical_key,
                         state: ElementState::Pressed,
-                        repeat: false,
+                        repeat,
                         ..
                     },
                 ..
-            } => match logical_key {
-                Key::Named(NamedKey::Escape) => event_loop.exit(),
-                Key::Named(NamedKey::Space) => self.feed.toggle_pause(),
-                Key::Named(NamedKey::ArrowRight) => self.feed.next(),
-                Key::Named(NamedKey::ArrowLeft) => self.feed.previous(),
-                Key::Character(c) if c.eq_ignore_ascii_case("n") => self.feed.next(),
-                Key::Character(c) if c.eq_ignore_ascii_case("p") => self.feed.previous(),
-                Key::Character(c) if c == "[" => self.adjust_delay(-DELAY_STEP_MS),
-                Key::Character(c) if c == "]" => self.adjust_delay(DELAY_STEP_MS),
-                _ => {}
-            },
+            } => {
+                self.wake_ui();
+                match logical_key {
+                    // Seeking repeats while the arrow is held.
+                    Key::Named(NamedKey::ArrowRight) => self.seek_by(SEEK_STEP),
+                    Key::Named(NamedKey::ArrowLeft) => self.seek_by(-SEEK_STEP),
+                    _ if repeat => {}
+                    Key::Named(NamedKey::Escape) => event_loop.exit(),
+                    Key::Named(NamedKey::Space) => self.feed.toggle_pause(),
+                    Key::Character(c) if c.eq_ignore_ascii_case("n") => self.feed.next(),
+                    Key::Character(c) if c.eq_ignore_ascii_case("p") => self.feed.previous(),
+                    Key::Character(c) if c == "[" => self.adjust_delay(-DELAY_STEP_MS),
+                    Key::Character(c) if c == "]" => self.adjust_delay(DELAY_STEP_MS),
+                    _ => {}
+                }
+            }
+            WindowEvent::CursorMoved { position, .. } => {
+                let (x, y) = (position.x as f32, position.y as f32);
+                self.cursor = Some((x, y));
+                self.wake_ui();
+                if self.dragging.is_some()
+                    && let Some(r) = &self.renderer
+                {
+                    // Follow the pointer along the bar even when it strays off it.
+                    let [tx, _, tw, _] = r.timeline_rect();
+                    self.dragging = Some(((x - tx) / tw).clamp(0.0, 1.0));
+                }
+            }
+            WindowEvent::CursorLeft { .. } => self.cursor = None,
+            WindowEvent::MouseInput {
+                state,
+                button: MouseButton::Left,
+                ..
+            } => {
+                self.wake_ui();
+                match state {
+                    ElementState::Pressed => {
+                        if let (Some((x, y)), Some(r), Some(_)) =
+                            (self.cursor, &self.renderer, self.timeline)
+                        {
+                            self.dragging = r.timeline_hit(x, y);
+                        }
+                    }
+                    ElementState::Released => {
+                        if let Some(fraction) = self.dragging.take()
+                            && let Some(duration) = self.feed.duration()
+                        {
+                            self.feed.seek(f64::from(fraction) * duration);
+                        }
+                    }
+                }
+            }
             WindowEvent::Resized(size) => {
                 if let Some(r) = &mut self.renderer {
                     r.resize(size.width, size.height);
@@ -251,6 +344,8 @@ impl ApplicationHandler for App {
                     palette: self.palette,
                     time: self.anim_time,
                     label: &self.label,
+                    ui_alpha: self.ui_alpha,
+                    timeline: self.timeline,
                 };
                 if let Err(err) = renderer.render(&scene) {
                     self.fail(event_loop, err);
@@ -296,6 +391,16 @@ fn main() -> Result<()> {
     }
 }
 
+/// Formats seconds as m:ss (or h:mm:ss).
+fn clock(secs: f64) -> String {
+    let s = secs.max(0.0) as u64;
+    if s >= 3600 {
+        format!("{}:{:02}:{:02}", s / 3600, s / 60 % 60, s % 60)
+    } else {
+        format!("{}:{:02}", s / 60, s % 60)
+    }
+}
+
 fn open_feed(args: &Args, config: &Config) -> Result<Feed> {
     let explicit_source = args.test || !args.files.is_empty() || args.source.is_some();
     if !(explicit_source || args.local) {
@@ -314,4 +419,17 @@ fn open_feed(args: &Args, config: &Config) -> Result<Feed> {
     let mut engine = Engine::new(source);
     engine.set_extra_delay_ms(args.delay_ms.unwrap_or(config.viz.delay_ms));
     Ok(Feed::Local(Box::new(engine)))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::clock;
+
+    #[test]
+    fn clock_formats_minutes_and_hours() {
+        assert_eq!(clock(0.0), "0:00");
+        assert_eq!(clock(65.9), "1:05");
+        assert_eq!(clock(3_725.0), "1:02:05");
+        assert_eq!(clock(-3.0), "0:00");
+    }
 }

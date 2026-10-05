@@ -15,7 +15,7 @@ use interprocess::local_socket::{GenericFilePath, GenericNamespaced, Name, prelu
 use serde::{Deserialize, Serialize};
 
 /// Bumped on any incompatible change to the messages below.
-pub const PROTOCOL_VERSION: u32 = 2;
+pub const PROTOCOL_VERSION: u32 = 3;
 
 /// Upper bound on a frame, so a bad peer can't make us allocate gigabytes.
 const MAX_FRAME: usize = 1 << 20;
@@ -32,8 +32,13 @@ pub enum ServerMsg {
         /// Spectrum frames per second.
         rate: u32,
     },
-    /// Band magnitudes, as produced by `av_core::Analyzer`.
-    Spectrum { seq: u64, mags: Vec<f32> },
+    /// Band magnitudes, as produced by `av_core::Analyzer`, and how far into
+    /// the current track playback is (files only), in seconds.
+    Spectrum {
+        seq: u64,
+        mags: Vec<f32>,
+        position: Option<f32>,
+    },
     /// Sent on connect and whenever it changes.
     Status(Status),
 }
@@ -51,15 +56,19 @@ pub struct Status {
     pub delay_ms: u32,
     /// The user's part of that delay (`delay_ms` in the config), in ms.
     pub extra_delay_ms: i32,
+    /// Length of the current track in seconds (files only, if known).
+    pub duration: Option<f32>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub enum ClientMsg {
     SetPaused(bool),
     Next,
     Previous,
     /// Shift the sync delay by this many milliseconds.
     AdjustDelay(i32),
+    /// Jump to this many seconds into the current track.
+    Seek(f32),
 }
 
 /// Encodes one message as a complete frame, ready to write.
@@ -201,6 +210,7 @@ mod tests {
             ServerMsg::Spectrum {
                 seq: 7,
                 mags: vec![0.0, 0.5, 1.0],
+                position: Some(12.5),
             },
             ServerMsg::Status(Status {
                 title: "playing: x.mp3".into(),
@@ -209,12 +219,14 @@ mod tests {
                 finished: false,
                 delay_ms: 230,
                 extra_delay_ms: 30,
+                duration: Some(181.0),
             }),
         ];
         let mut wire = Vec::new();
         for m in &msgs {
             write_msg(&mut wire, m).unwrap();
         }
+        write_msg(&mut wire, &ClientMsg::Seek(42.0)).unwrap();
         write_msg(&mut wire, &ClientMsg::Next).unwrap();
 
         let mut r = wire.as_slice();
@@ -222,6 +234,10 @@ mod tests {
         for m in &msgs {
             assert_eq!(&read_msg::<_, ServerMsg>(&mut r, &mut buf).unwrap(), m);
         }
+        assert_eq!(
+            read_msg::<_, ClientMsg>(&mut r, &mut buf).unwrap(),
+            ClientMsg::Seek(42.0)
+        );
         assert_eq!(
             read_msg::<_, ClientMsg>(&mut r, &mut buf).unwrap(),
             ClientMsg::Next

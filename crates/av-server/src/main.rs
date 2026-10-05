@@ -214,6 +214,7 @@ fn serve(
                     ClientMsg::SetPaused(paused) => engine.set_paused(paused),
                     ClientMsg::Next => engine.next(),
                     ClientMsg::Previous => engine.previous(),
+                    ClientMsg::Seek(secs) => engine.seek(f64::from(secs)),
                     ClientMsg::AdjustDelay(ms) => {
                         engine.adjust_extra_delay_ms(ms);
                         eprintln!("delay adjusted: delay_ms = {}", engine.extra_delay_ms());
@@ -237,7 +238,13 @@ fn serve(
             logged_delay_ms = Some(delay_ms);
         }
         seq += 1;
-        let spectrum: Frame = encode(&ServerMsg::Spectrum { seq, mags })?.into();
+        let position = engine.position().map(|p| p as f32);
+        let spectrum: Frame = encode(&ServerMsg::Spectrum {
+            seq,
+            mags,
+            position,
+        })?
+        .into();
 
         let new_status = current_status(engine);
         // Also resend once a second, in case a full queue dropped a change.
@@ -280,5 +287,6 @@ fn current_status(engine: &mut Engine) -> Status {
         // Rounded so latency jitter doesn't resend the status every tick.
         delay_ms: (engine.delay().as_millis() as u32).div_ceil(10) * 10,
         extra_delay_ms: engine.extra_delay_ms(),
+        duration: engine.duration().map(|d| d as f32),
     }
 }

@@ -182,6 +182,29 @@ impl Engine {
         matches!(self.source, Source::Player(_))
     }
 
+    /// Seconds into the current track, for sources that have tracks.
+    pub fn position(&mut self) -> Option<f64> {
+        match &mut self.source {
+            Source::Player(player) => Some(player.position()),
+            _ => None,
+        }
+    }
+
+    /// Length of the current track in seconds, if known.
+    pub fn duration(&mut self) -> Option<f64> {
+        match &mut self.source {
+            Source::Player(player) => player.duration(),
+            _ => None,
+        }
+    }
+
+    /// Jumps to `secs` into the current track (files only).
+    pub fn seek(&mut self, secs: f64) {
+        if let Source::Player(player) = &mut self.source {
+            player.seek(secs);
+        }
+    }
+
     pub fn next(&mut self) {
         if let Source::Player(player) = &mut self.source {
             player.next();

@@ -7,8 +7,9 @@ use anyhow::{Context, Result, anyhow};
 use symphonia::core::codecs::audio::{AudioDecoder, AudioDecoderOptions};
 use symphonia::core::errors::Error;
 use symphonia::core::formats::probe::Hint;
-use symphonia::core::formats::{FormatReader, TrackType};
+use symphonia::core::formats::{FormatReader, SeekMode, SeekTo, TrackType};
 use symphonia::core::io::MediaSourceStream;
+use symphonia::core::units::{Time, TimeBase};
 
 /// An open audio file producing interleaved `f32` frames at its native rate.
 pub struct Decoder {
@@ -17,6 +18,10 @@ pub struct Decoder {
     track_id: u32,
     sample_rate: u32,
     channels: usize,
+    time_base: Option<TimeBase>,
+    duration: Option<f64>,
+    /// Frames still to drop after a seek landed before its target.
+    skip_frames: usize,
 }
 
 impl Decoder {
@@ -50,6 +55,13 @@ impl Decoder {
             .make_audio_decoder(params, &AudioDecoderOptions::default())
             .with_context(|| format!("unsupported codec in {}", path.display()))?;
         let track_id = track.id;
+        let time_base = track.time_base;
+        // Prefer the container's duration; fall back to counting frames.
+        let duration = time_base
+            .zip(track.duration)
+            .and_then(|(tb, d)| tb.calc_duration(d))
+            .map(|t| t.as_secs_f64())
+            .or_else(|| track.num_frames.map(|n| n as f64 / f64::from(sample_rate)));
 
         Ok(Self {
             format,
@@ -57,7 +69,43 @@ impl Decoder {
             track_id,
             sample_rate,
             channels,
+            time_base,
+            duration,
+            skip_frames: 0,
         })
+    }
+
+    /// Length of the track in seconds, if the file says.
+    pub fn duration(&self) -> Option<f64> {
+        self.duration
+    }
+
+    /// Jumps to `secs` from the start and returns the new position in
+    /// seconds. Formats land on a packet boundary at or before the target; the
+    /// samples in between are dropped, so playback starts right at `secs`.
+    pub fn seek(&mut self, secs: f64) -> Result<f64> {
+        let time = Time::try_from_secs_f64(secs.max(0.0))
+            .ok_or_else(|| anyhow!("cannot seek to {secs} s"))?;
+        let to = SeekTo::Time {
+            time,
+            track_id: Some(self.track_id),
+        };
+        let seeked = self.format.seek(SeekMode::Accurate, to)?;
+        self.decoder.reset();
+        let to_secs = |ts| {
+            self.time_base
+                .and_then(|tb| tb.calc_time(ts))
+                .map(|t| t.as_secs_f64())
+        };
+        let (Some(required), Some(actual)) =
+            (to_secs(seeked.required_ts), to_secs(seeked.actual_ts))
+        else {
+            self.skip_frames = 0;
+            return Ok(secs);
+        };
+        let early = (required - actual).max(0.0);
+        self.skip_frames = (early * f64::from(self.sample_rate)).round() as usize;
+        Ok(required)
     }
 
     pub fn sample_rate(&self) -> u32 {
@@ -88,6 +136,15 @@ impl Decoder {
                     out.clear();
                     out.resize(buf.samples_interleaved(), 0.0);
                     buf.copy_to_slice_interleaved(&mut out[..]);
+                    if self.skip_frames > 0 {
+                        let frames = out.len() / self.channels.max(1);
+                        let skip = self.skip_frames.min(frames);
+                        out.drain(..skip * self.channels);
+                        self.skip_frames -= skip;
+                        if out.is_empty() {
+                            continue;
+                        }
+                    }
                     return Ok(true);
                 }
                 // A corrupt packet is skipped, not fatal.
@@ -161,6 +218,30 @@ pub(crate) mod tests {
         assert_eq!(samples, 11_025 * 2);
         assert!((peak - 16_000.0 / 32_768.0).abs() < 0.01, "peak {peak}");
 
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn knows_duration_and_seeks() {
+        let dir = temp_dir("seek");
+        // Two seconds at 8 kHz.
+        let path = write_wav(&dir, "two.wav", 8_000, 1, 16_000);
+        let mut decoder = Decoder::open(&path).unwrap();
+        let duration = decoder.duration().expect("wav has a duration");
+        assert!((duration - 2.0).abs() < 1e-3, "{duration}");
+
+        let landed = decoder.seek(1.5).unwrap();
+        assert!((landed - 1.5).abs() < 1e-3, "landed at {landed}");
+        let mut chunk = Vec::new();
+        let mut frames = 0;
+        while decoder.next_chunk(&mut chunk).unwrap() {
+            frames += chunk.len();
+        }
+        // Exactly half a second left.
+        assert!(
+            (3_990..=4_010).contains(&frames),
+            "{frames} frames after seek"
+        );
         std::fs::remove_dir_all(dir).unwrap();
     }
 

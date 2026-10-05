@@ -76,6 +76,33 @@ impl Feed {
         }
     }
 
+    /// Seconds into the current track, when playing files.
+    pub fn position(&mut self) -> Option<f64> {
+        match self {
+            Self::Local(engine) => engine.position(),
+            Self::Remote(remote) => remote.position().map(f64::from),
+        }
+    }
+
+    /// Length of the current track in seconds, when playing files.
+    pub fn duration(&mut self) -> Option<f64> {
+        match self {
+            Self::Local(engine) => engine.duration(),
+            Self::Remote(remote) if remote.is_connected() => {
+                remote.status().duration.map(f64::from)
+            }
+            Self::Remote(_) => None,
+        }
+    }
+
+    /// Jumps to `secs` into the current track.
+    pub fn seek(&mut self, secs: f64) {
+        match self {
+            Self::Local(engine) => engine.seek(secs),
+            Self::Remote(remote) => remote.send(ClientMsg::Seek(secs.max(0.0) as f32)),
+        }
+    }
+
     /// Whether playback is paused (locally, or on the server).
     pub fn is_paused(&self) -> bool {
         match self {

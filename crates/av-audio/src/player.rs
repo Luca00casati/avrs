@@ -72,6 +72,8 @@ fn is_audio_file(path: &Path) -> bool {
 enum Command {
     /// Jump to a track; `true` if moving backwards through the playlist.
     Play(usize, bool),
+    /// Play a track from this many seconds in.
+    Seek(usize, f64),
     Stop,
 }
 
@@ -91,8 +93,11 @@ struct Shared {
     /// Time from the output callback until its audio is heard, in microseconds,
     /// as reported by the backend (includes e.g. Bluetooth transport).
     latency_us: AtomicU64,
-    /// `(queued frame, track)` where each track starts, oldest first.
-    starts: Mutex<VecDeque<(u64, usize)>>,
+    /// `(queued frame, track, seconds into the track)` where each stretch of
+    /// playback starts (a new track, or a seek), oldest first.
+    starts: Mutex<VecDeque<(u64, usize, f64)>>,
+    /// Length of each playlist entry in seconds, once the decoder has seen it.
+    durations: Mutex<Vec<Option<f64>>>,
 }
 
 /// Plays a playlist on the default output device.
@@ -105,6 +110,8 @@ pub struct Player {
     tap: rtrb::Consumer<f32>,
     playlist: Arc<[PathBuf]>,
     current: usize,
+    /// Consumed-frame count and track position where the current stretch began.
+    current_start: (u64, f64),
     looping: bool,
     sample_rate: u32,
     sink_latency: SinkLatency,
@@ -129,7 +136,10 @@ impl Player {
         };
 
         let queue_len = (sample_rate as f32 * QUEUE_SECS) as usize * channels;
-        let shared = Arc::new(Shared::default());
+        let shared = Arc::new(Shared {
+            durations: Mutex::new(vec![None; playlist.len()]),
+            ..Shared::default()
+        });
 
         // A short device buffer keeps pause and track changes immediate and
         // the reported latency honest; fall back to the default if refused.
@@ -178,6 +188,7 @@ impl Player {
             tap: tap_rx,
             playlist,
             current: 0,
+            current_start: (0, 0.0),
             looping,
             sample_rate,
             sink_latency,
@@ -203,14 +214,40 @@ impl Player {
     pub fn current(&mut self) -> usize {
         let consumed = self.shared.consumed.load(Ordering::Acquire);
         let mut starts = self.shared.starts.lock().unwrap();
-        while let Some(&(at, track)) = starts.front() {
+        while let Some(&(at, track, offset)) = starts.front() {
             if at > consumed {
                 break;
             }
             self.current = track;
+            self.current_start = (at, offset);
             starts.pop_front();
         }
         self.current
+    }
+
+    /// Seconds into the track being heard.
+    pub fn position(&mut self) -> f64 {
+        self.current();
+        let (start, offset) = self.current_start;
+        let consumed = self.shared.consumed.load(Ordering::Acquire);
+        let played = consumed.saturating_sub(start) as f64 / f64::from(self.sample_rate);
+        let position = offset + played;
+        self.duration().map_or(position, |d| position.min(d))
+    }
+
+    /// Length of the track being heard, in seconds, if known.
+    pub fn duration(&mut self) -> Option<f64> {
+        let current = self.current();
+        self.shared.durations.lock().unwrap()[current]
+    }
+
+    /// Jumps to `secs` into the track being heard (clamped to the track).
+    pub fn seek(&mut self, secs: f64) {
+        let current = self.current();
+        let end = self.duration().map_or(f64::MAX, |d| (d - 0.05).max(0.0));
+        let _ = self
+            .commands
+            .send(Command::Seek(current, secs.clamp(0.0, end)));
     }
 
     pub fn playlist(&self) -> &[PathBuf] {
@@ -306,6 +343,7 @@ struct DecoderThread {
 /// What interrupted queueing a track.
 enum Interrupt {
     Play(usize, bool),
+    Seek(usize, f64),
     Stop,
 }
 
@@ -313,12 +351,14 @@ impl DecoderThread {
     fn run(mut self) {
         let len = self.playlist.len();
         let mut track = 0;
+        // Where to start the next track, in seconds (set by seeks).
+        let mut start_at = 0.0;
         // Direction to skip unplayable tracks in: the way the user last moved.
         let mut backward = false;
         // Consecutive tracks that failed, to stop on an all-bad playlist.
         let mut failures = 0;
         loop {
-            match self.play_track(track) {
+            match self.play_track(track, std::mem::take(&mut start_at)) {
                 Ok(None) => {
                     failures = 0;
                     backward = false;
@@ -329,6 +369,13 @@ impl DecoderThread {
                     }
                     failures = 0;
                     (track, backward) = (next.min(len - 1), back);
+                    continue;
+                }
+                Ok(Some(Interrupt::Seek(at, secs))) => {
+                    if !self.flush() {
+                        return;
+                    }
+                    (track, start_at) = (at.min(len - 1), secs);
                     continue;
                 }
                 Ok(Some(Interrupt::Stop)) => return,
@@ -366,6 +413,14 @@ impl DecoderThread {
                         failures = 0;
                         (track, backward) = (next.min(len - 1), back);
                     }
+                    Ok(Command::Seek(at, secs)) => {
+                        self.shared.exhausted.store(false, Ordering::Release);
+                        if !self.flush() {
+                            return;
+                        }
+                        failures = 0;
+                        (track, start_at) = (at.min(len - 1), secs);
+                    }
                     Ok(Command::Stop) | Err(_) => return,
                 }
             }
@@ -384,9 +439,16 @@ impl DecoderThread {
         }
     }
 
-    /// Decodes and queues one track. Returns early if a command arrives.
-    fn play_track(&mut self, index: usize) -> Result<Option<Interrupt>> {
+    /// Decodes and queues one track from `start_at` seconds in. Returns early
+    /// if a command arrives.
+    fn play_track(&mut self, index: usize, start_at: f64) -> Result<Option<Interrupt>> {
         let mut decoder = Decoder::open(&self.playlist[index])?;
+        self.shared.durations.lock().unwrap()[index] = decoder.duration();
+        let offset = if start_at > 0.0 {
+            decoder.seek(start_at)?
+        } else {
+            0.0
+        };
         let mut converter = Converter::new(
             decoder.sample_rate(),
             decoder.channels(),
@@ -395,7 +457,11 @@ impl DecoderThread {
         )?;
 
         let start = self.shared.queued.load(Ordering::Acquire);
-        self.shared.starts.lock().unwrap().push_back((start, index));
+        self.shared
+            .starts
+            .lock()
+            .unwrap()
+            .push_back((start, index, offset));
 
         let mut decoded = Vec::new();
         let mut converted = Vec::new();
@@ -474,6 +540,7 @@ impl DecoderThread {
         };
         cmd.map(|c| match c {
             Command::Play(n, back) => Interrupt::Play(n, back),
+            Command::Seek(n, secs) => Interrupt::Seek(n, secs),
             Command::Stop => Interrupt::Stop,
         })
     }

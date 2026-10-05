@@ -22,6 +22,8 @@ pub struct Remote {
 struct State {
     connected: bool,
     mags: Vec<f32>,
+    /// Seconds into the current track, for files.
+    position: Option<f32>,
     status: Status,
     /// Why the last connection failed, if it did.
     problem: Option<String>,
@@ -64,6 +66,12 @@ impl Remote {
 
     pub fn is_connected(&self) -> bool {
         self.state.lock().unwrap().connected
+    }
+
+    /// Seconds into the server's current track, if it is playing a file.
+    pub fn position(&self) -> Option<f32> {
+        let state = self.state.lock().unwrap();
+        state.position.filter(|_| state.connected)
     }
 
     pub fn status(&self) -> Status {
@@ -159,7 +167,11 @@ fn session(
 
     loop {
         match read_msg(recv, &mut buf)? {
-            ServerMsg::Spectrum { mags, .. } => state.lock().unwrap().mags = mags,
+            ServerMsg::Spectrum { mags, position, .. } => {
+                let mut s = state.lock().unwrap();
+                s.mags = mags;
+                s.position = position;
+            }
             ServerMsg::Status(status) => state.lock().unwrap().status = status,
             ServerMsg::Hello { .. } => {}
         }

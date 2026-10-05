@@ -25,6 +25,11 @@ pub struct Scene<'a> {
     /// Seconds since start, for palettes that change over time.
     pub time: f32,
     pub label: &'a str,
+    /// Visibility of the label and timeline, 0 (hidden) to 1.
+    pub ui_alpha: f32,
+    /// Playback progress through the current track (0 to 1), when playing
+    /// files; draws the timeline.
+    pub timeline: Option<f32>,
 }
 
 /// One rounded, gradient-filled, optionally glowing rectangle (see bars.wgsl).
@@ -91,6 +96,13 @@ impl Renderer {
     const PEAK_HEIGHT: f32 = 3.5;
     const PEAK_GAP: f32 = 6.0;
     const FONT_SIZE: f32 = 20.0;
+    // Timeline, in logical pixels.
+    const TIMELINE_MARGIN: f32 = 24.0;
+    const TIMELINE_BOTTOM: f32 = 22.0;
+    const TIMELINE_HEIGHT: f32 = 4.0;
+    /// How far from the bar a click still counts as on it.
+    const TIMELINE_REACH: f32 = 14.0;
+    const KNOB: f32 = 13.0;
     const TEXT_MARGIN: f32 = 18.0;
 
     /// Near-black stage behind the bars (sRGB).
@@ -262,9 +274,13 @@ impl Renderer {
         self.queue
             .write_buffer(&self.globals, 0, bytemuck::cast_slice(&[w, h, 0.0, 0.0]));
         self.build_rects(scene, w, h);
+        if let Some(progress) = scene.timeline.filter(|_| scene.ui_alpha > 0.0) {
+            self.push_timeline(progress, scene);
+        }
         self.upload_rects();
+        let text_alpha = (190.0 * scene.ui_alpha.clamp(0.0, 1.0)) as u8;
         self.text
-            .prepare(&self.device, &self.queue, scene.label, w, h)?;
+            .prepare(&self.device, &self.queue, scene.label, text_alpha, w, h)?;
 
         let view = frame.texture.create_view(&Default::default());
         let mut encoder = self.device.create_command_encoder(&Default::default());
@@ -392,6 +408,65 @@ impl Renderer {
         self.queue.write_buffer(&self.rect_buffer, 0, bytes);
     }
 
+    /// Where the timeline bar is drawn: x, y, width, height in pixels.
+    pub fn timeline_rect(&self) -> [f32; 4] {
+        let px = self.window.scale_factor() as f32;
+        let (w, h) = (self.config.width as f32, self.config.height as f32);
+        let margin = Self::TIMELINE_MARGIN * px;
+        let height = Self::TIMELINE_HEIGHT * px;
+        [
+            margin,
+            h - Self::TIMELINE_BOTTOM * px - height,
+            w - 2.0 * margin,
+            height,
+        ]
+    }
+
+    /// The timeline position (0 to 1) under a point in window pixels, if the
+    /// point is on or near the bar.
+    pub fn timeline_hit(&self, x: f32, y: f32) -> Option<f32> {
+        let px = self.window.scale_factor() as f32;
+        let [tx, ty, tw, th] = self.timeline_rect();
+        let reach = Self::TIMELINE_REACH * px;
+        let near = (ty - reach..=ty + th + reach).contains(&y)
+            && (tx - reach..=tx + tw + reach).contains(&x);
+        near.then(|| ((x - tx) / tw).clamp(0.0, 1.0))
+    }
+
+    /// The timeline: a faint track, the played part in the palette's colour
+    /// at that point, and a round handle.
+    fn push_timeline(&mut self, progress: f32, scene: &Scene) {
+        let px = self.window.scale_factor() as f32;
+        let a = scene.ui_alpha.clamp(0.0, 1.0);
+        let [x, y, w, h] = self.timeline_rect();
+        let p = progress.clamp(0.0, 1.0);
+        let c = scene.palette.color(p, scene.time);
+        let track = [1.0, 1.0, 1.0, 0.16 * a];
+        self.rects.push(Shape {
+            xywh: [x, y, w, h],
+            params: [h / 2.0, 0.0, 0.0, 0.0],
+            top: track,
+            bottom: track,
+            glow: [0.0; 4],
+        });
+        let fill = self.rgba(c, 0.95 * a);
+        self.rects.push(Shape {
+            xywh: [x, y, (w * p).max(h), h],
+            params: [h / 2.0, 6.0 * px, 0.0, 0.0],
+            top: fill,
+            bottom: fill,
+            glow: self.rgba(c, 0.45 * a),
+        });
+        let d = Self::KNOB * px;
+        self.rects.push(Shape {
+            xywh: [x + w * p - d / 2.0, y + h / 2.0 - d / 2.0, d, d],
+            params: [d / 2.0, 6.0 * px, 0.0, 0.0],
+            top: self.rgba(c.lighten(0.25), a),
+            bottom: self.rgba(c.lighten(0.1), a),
+            glow: self.rgba(c, 0.5 * a),
+        });
+    }
+
     /// Converts an sRGB colour to what the surface expects.
     fn output_color(&self, srgb: [f32; 3]) -> [f32; 3] {
         if self.config.format.is_srgb() {
@@ -500,6 +575,7 @@ impl Text {
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         label: &str,
+        alpha: u8,
         w: f32,
         h: f32,
     ) -> Result<()> {
@@ -540,7 +616,7 @@ impl Text {
                     right: w as i32,
                     bottom: h as i32,
                 },
-                default_color: glyphon::Color::rgba(232, 228, 222, 190),
+                default_color: glyphon::Color::rgba(232, 228, 222, alpha),
                 custom_glyphs: &[],
             }],
             &mut self.swash_cache,
