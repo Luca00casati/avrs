@@ -15,7 +15,7 @@ use interprocess::local_socket::{GenericFilePath, GenericNamespaced, Name, prelu
 use serde::{Deserialize, Serialize};
 
 /// Bumped on any incompatible change to the messages below.
-pub const PROTOCOL_VERSION: u32 = 3;
+pub const PROTOCOL_VERSION: u32 = 4;
 
 /// Upper bound on a frame, so a bad peer can't make us allocate gigabytes.
 const MAX_FRAME: usize = 1 << 20;
@@ -58,6 +58,8 @@ pub struct Status {
     pub extra_delay_ms: i32,
     /// Length of the current track in seconds (files only, if known).
     pub duration: Option<f32>,
+    /// Playback volume in percent (files only).
+    pub volume: Option<u32>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
@@ -69,6 +71,8 @@ pub enum ClientMsg {
     AdjustDelay(i32),
     /// Jump to this many seconds into the current track.
     Seek(f32),
+    /// Change the playback volume by this many percent.
+    AdjustVolume(i32),
 }
 
 /// Encodes one message as a complete frame, ready to write.
@@ -220,6 +224,7 @@ mod tests {
                 delay_ms: 230,
                 extra_delay_ms: 30,
                 duration: Some(181.0),
+                volume: Some(80),
             }),
         ];
         let mut wire = Vec::new();

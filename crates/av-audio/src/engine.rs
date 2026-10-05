@@ -205,6 +205,21 @@ impl Engine {
         }
     }
 
+    /// Playback volume in percent, for files.
+    pub fn volume(&self) -> Option<u32> {
+        match &self.source {
+            Source::Player(player) => Some(player.volume()),
+            _ => None,
+        }
+    }
+
+    /// Changes the playback volume by `delta` percent (files only).
+    pub fn adjust_volume(&mut self, delta: i32) {
+        if let Source::Player(player) = &self.source {
+            player.set_volume(player.volume() as i32 + delta);
+        }
+    }
+
     pub fn next(&mut self) {
         if let Source::Player(player) = &mut self.source {
             player.next();

@@ -81,6 +81,8 @@ const MAX_DT: f32 = 0.1;
 const UI_SHOW: std::time::Duration = std::time::Duration::from_millis(2500);
 /// How quickly they fade in and out (per second).
 const UI_FADE_RATE: f32 = 8.0;
+/// Percent the + and - keys change the volume by.
+const VOLUME_STEP: i32 = 5;
 /// Seconds the seek keys move through a track.
 const SEEK_STEP: f64 = 5.0;
 /// How long after a seek further seeks count from its target rather than
@@ -206,6 +208,9 @@ impl App {
             use std::fmt::Write as _;
             let p = self.dragging.map_or(p, |f| f64::from(f) * d);
             let _ = write!(self.label, "\n{} / {}", clock(p), clock(d));
+            if let Some(volume) = self.feed.volume() {
+                let _ = write!(self.label, "   ·   volume {volume}%");
+            }
         }
         if self.show_delay_until.is_some_and(|until| now < until)
             && let Some((total, extra)) = self.feed.delay_info()
@@ -299,6 +304,12 @@ impl ApplicationHandler for App {
                     Key::Named(NamedKey::ArrowUp) => self.feed.previous(),
                     Key::Character(c) if c.eq_ignore_ascii_case("n") => self.feed.next(),
                     Key::Character(c) if c.eq_ignore_ascii_case("p") => self.feed.previous(),
+                    Key::Character(c) if c == "+" || c == "=" => {
+                        self.feed.adjust_volume(VOLUME_STEP)
+                    }
+                    Key::Character(c) if c == "-" || c == "_" => {
+                        self.feed.adjust_volume(-VOLUME_STEP)
+                    }
                     Key::Character(c) if c == "[" => self.adjust_delay(-DELAY_STEP_MS),
                     Key::Character(c) if c == "]" => self.adjust_delay(DELAY_STEP_MS),
                     _ => {}

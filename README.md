@@ -28,8 +28,8 @@ av-viz --sources             # list capturable devices
 ```
 
 Keys: **Space** pause, **←**/**→** or **B**/**F** back/forward 5 s,
-**↓**/**↑** or **N**/**P** next/previous track, **[**/**]** sync delay −/+10 ms,
-**Esc** quit.
+**↓**/**↑** or **N**/**P** next/previous track, **+**/**-** volume (files),
+**[**/**]** sync delay −/+10 ms, **Esc** quit.
 
 The title and, for files, a timeline appear when you move the mouse or press a
 key, and fade out after a couple of seconds. Click or drag on the timeline to

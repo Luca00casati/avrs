@@ -10,7 +10,7 @@
 
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
@@ -93,6 +93,8 @@ struct Shared {
     /// Time from the output callback until its audio is heard, in microseconds,
     /// as reported by the backend (includes e.g. Bluetooth transport).
     latency_us: AtomicU64,
+    /// Playback volume in percent (0 to 100).
+    volume: AtomicU32,
     /// `(queued frame, track, seconds into the track)` where each stretch of
     /// playback starts (a new track, or a seek), oldest first.
     starts: Mutex<VecDeque<(u64, usize, f64)>>,
@@ -138,6 +140,7 @@ impl Player {
         let queue_len = (sample_rate as f32 * QUEUE_SECS) as usize * channels;
         let shared = Arc::new(Shared {
             durations: Mutex::new(vec![None; playlist.len()]),
+            volume: AtomicU32::new(100),
             ..Shared::default()
         });
 
@@ -267,6 +270,18 @@ impl Player {
 
     pub fn is_paused(&self) -> bool {
         self.shared.paused.load(Ordering::Relaxed)
+    }
+
+    /// Playback volume in percent.
+    pub fn volume(&self) -> u32 {
+        self.shared.volume.load(Ordering::Relaxed)
+    }
+
+    /// Sets the playback volume in percent (clamped to 0..=100). Only what
+    /// is heard changes; the analysis sees the full-level signal.
+    pub fn set_volume(&self, percent: i32) {
+        let percent = percent.clamp(0, 100) as u32;
+        self.shared.volume.store(percent, Ordering::Relaxed);
     }
 
     pub fn set_paused(&self, paused: bool) {
@@ -567,6 +582,16 @@ impl DecoderThread {
     }
 }
 
+/// Per-frame step of the volume glide (about 5 ms to settle at 48 kHz).
+const GAIN_GLIDE: f32 = 0.004;
+
+/// Linear gain for a volume in percent. Squared, so equal steps sound
+/// roughly equally loud.
+fn volume_gain(percent: u32) -> f32 {
+    let v = percent.min(100) as f32 / 100.0;
+    v * v
+}
+
 fn build_output(
     device: &cpal::Device,
     format: SampleFormat,
@@ -607,6 +632,9 @@ where
     T: SizedSample + FromSample<f32>,
 {
     let inv = 1.0 / channels as f32;
+    // Gain actually applied, gliding towards the requested volume so that
+    // changes don't click.
+    let mut gain = volume_gain(shared.volume.load(Ordering::Relaxed));
     let error_shared = shared.clone();
     device.build_output_stream::<T, _, _>(
         config,
@@ -640,12 +668,14 @@ where
             };
             let (a, b) = chunk.as_slices();
             let mut samples = a.iter().chain(b);
+            let target = volume_gain(shared.volume.load(Ordering::Relaxed));
             for frame in out[..frames * channels].chunks_exact_mut(channels) {
+                gain += (target - gain) * GAIN_GLIDE;
                 let mut sum = 0.0;
                 for slot in frame {
                     let s = *samples.next().expect("whole frames");
                     sum += s;
-                    *slot = T::from_sample(s);
+                    *slot = T::from_sample(s * gain);
                 }
                 // Visualization only: drop samples if nobody is reading.
                 let _ = tap.push(sum * inv);

@@ -215,6 +215,7 @@ fn serve(
                     ClientMsg::Next => engine.next(),
                     ClientMsg::Previous => engine.previous(),
                     ClientMsg::Seek(secs) => engine.seek(f64::from(secs)),
+                    ClientMsg::AdjustVolume(delta) => engine.adjust_volume(delta),
                     ClientMsg::AdjustDelay(ms) => {
                         engine.adjust_extra_delay_ms(ms);
                         eprintln!("delay adjusted: delay_ms = {}", engine.extra_delay_ms());
@@ -288,5 +289,6 @@ fn current_status(engine: &mut Engine) -> Status {
         delay_ms: (engine.delay().as_millis() as u32).div_ceil(10) * 10,
         extra_delay_ms: engine.extra_delay_ms(),
         duration: engine.duration().map(|d| d as f32),
+        volume: engine.volume(),
     }
 }

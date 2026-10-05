@@ -103,6 +103,23 @@ impl Feed {
         }
     }
 
+    /// Playback volume in percent, when playing files.
+    pub fn volume(&self) -> Option<u32> {
+        match self {
+            Self::Local(engine) => engine.volume(),
+            Self::Remote(remote) if remote.is_connected() => remote.status().volume,
+            Self::Remote(_) => None,
+        }
+    }
+
+    /// Changes the playback volume by `delta` percent.
+    pub fn adjust_volume(&mut self, delta: i32) {
+        match self {
+            Self::Local(engine) => engine.adjust_volume(delta),
+            Self::Remote(remote) => remote.send(ClientMsg::AdjustVolume(delta)),
+        }
+    }
+
     /// Whether playback is paused (locally, or on the server).
     pub fn is_paused(&self) -> bool {
         match self {
