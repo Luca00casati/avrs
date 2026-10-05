@@ -21,7 +21,7 @@ use winit::dpi::LogicalSize;
 use winit::event::{ElementState, KeyEvent, MouseButton, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, EventLoop};
 use winit::keyboard::{Key, NamedKey};
-use winit::window::{Window, WindowId};
+use winit::window::{Fullscreen, Window, WindowId};
 
 use feed::Feed;
 use remote::Remote;
@@ -126,6 +126,8 @@ struct App {
     /// The last seek target and when it was asked for: the player takes a
     /// moment to get there, so quick repeated seeks build on the target.
     pending_seek: Option<(f64, Instant)>,
+    /// Whether the mouse pointer is currently hidden (fullscreen, idle).
+    cursor_hidden: bool,
     error: Option<anyhow::Error>,
 }
 
@@ -153,6 +155,7 @@ impl App {
             dragging: None,
             cursor: None,
             pending_seek: None,
+            cursor_hidden: false,
             error: None,
         }
     }
@@ -195,6 +198,14 @@ impl App {
         let shown = now < self.ui_until || self.dragging.is_some();
         let target = if shown { 1.0 } else { 0.0 };
         self.ui_alpha += (target - self.ui_alpha) * (dt * UI_FADE_RATE).min(1.0);
+        // In fullscreen the pointer fades out with the controls.
+        let hide_cursor = self.is_fullscreen() && !shown;
+        if hide_cursor != self.cursor_hidden
+            && let Some(r) = &self.renderer
+        {
+            r.window().set_cursor_visible(!hide_cursor);
+            self.cursor_hidden = hide_cursor;
+        }
 
         self.finished = self.feed.should_exit();
         let (position, duration) = (self.feed.position(), self.feed.duration());
@@ -217,6 +228,24 @@ impl App {
         {
             use std::fmt::Write as _;
             let _ = write!(self.label, "\nsync delay {total} ms  (delay_ms = {extra})");
+        }
+    }
+
+    fn is_fullscreen(&self) -> bool {
+        self.renderer
+            .as_ref()
+            .is_some_and(|r| r.window().fullscreen().is_some())
+    }
+
+    fn toggle_fullscreen(&mut self) {
+        let Some(r) = &self.renderer else {
+            return;
+        };
+        let window = r.window();
+        if window.fullscreen().is_some() {
+            window.set_fullscreen(None);
+        } else {
+            window.set_fullscreen(Some(Fullscreen::Borderless(None)));
         }
     }
 
@@ -292,12 +321,27 @@ impl ApplicationHandler for App {
             } => {
                 self.wake_ui();
                 match logical_key {
+                    // Shift+F (capital F) or F11; plain f seeks.
+                    Key::Character(c) if c == "F" => {
+                        if !repeat {
+                            self.toggle_fullscreen();
+                        }
+                    }
+                    Key::Named(NamedKey::F11) => {
+                        if !repeat {
+                            self.toggle_fullscreen();
+                        }
+                    }
                     // Seeking repeats while the key is held.
                     Key::Named(NamedKey::ArrowRight) => self.seek_by(SEEK_STEP),
                     Key::Named(NamedKey::ArrowLeft) => self.seek_by(-SEEK_STEP),
                     Key::Character(c) if c.eq_ignore_ascii_case("f") => self.seek_by(SEEK_STEP),
                     Key::Character(c) if c.eq_ignore_ascii_case("b") => self.seek_by(-SEEK_STEP),
                     _ if repeat => {}
+                    // Esc leaves fullscreen first, then quits.
+                    Key::Named(NamedKey::Escape) if self.is_fullscreen() => {
+                        self.toggle_fullscreen();
+                    }
                     Key::Named(NamedKey::Escape) => event_loop.exit(),
                     Key::Named(NamedKey::Space) => self.feed.toggle_pause(),
                     Key::Named(NamedKey::ArrowDown) => self.feed.next(),
