@@ -81,8 +81,11 @@ const MAX_DT: f32 = 0.1;
 const UI_SHOW: std::time::Duration = std::time::Duration::from_millis(2500);
 /// How quickly they fade in and out (per second).
 const UI_FADE_RATE: f32 = 8.0;
-/// Seconds the arrow keys move through a track.
+/// Seconds the seek keys move through a track.
 const SEEK_STEP: f64 = 5.0;
+/// How long after a seek further seeks count from its target rather than
+/// from the reported position (which lags while the player gets there).
+const SEEK_SETTLE: std::time::Duration = std::time::Duration::from_millis(600);
 /// Step for the `[` and `]` sync keys, in ms.
 const DELAY_STEP_MS: i32 = 10;
 /// How long the delay stays in the label after adjusting it.
@@ -118,6 +121,9 @@ struct App {
     dragging: Option<f32>,
     /// Mouse position in window pixels, while over the window.
     cursor: Option<(f32, f32)>,
+    /// The last seek target and when it was asked for: the player takes a
+    /// moment to get there, so quick repeated seeks build on the target.
+    pending_seek: Option<(f64, Instant)>,
     error: Option<anyhow::Error>,
 }
 
@@ -144,6 +150,7 @@ impl App {
             timeline: None,
             dragging: None,
             cursor: None,
+            pending_seek: None,
             error: None,
         }
     }
@@ -215,9 +222,19 @@ impl App {
 
     /// Moves `delta` seconds through the current track.
     fn seek_by(&mut self, delta: f64) {
-        if let Some(position) = self.feed.position() {
-            self.feed.seek(position + delta);
+        let pending = self
+            .pending_seek
+            .filter(|(_, at)| at.elapsed() < SEEK_SETTLE)
+            .map(|(target, _)| target);
+        if let Some(from) = pending.or_else(|| self.feed.position()) {
+            let end = self.feed.duration().unwrap_or(f64::MAX);
+            self.seek_to((from + delta).clamp(0.0, end));
         }
+    }
+
+    fn seek_to(&mut self, secs: f64) {
+        self.feed.seek(secs);
+        self.pending_seek = Some((secs, Instant::now()));
     }
 
     fn adjust_delay(&mut self, delta_ms: i32) {
@@ -270,12 +287,16 @@ impl ApplicationHandler for App {
             } => {
                 self.wake_ui();
                 match logical_key {
-                    // Seeking repeats while the arrow is held.
+                    // Seeking repeats while the key is held.
                     Key::Named(NamedKey::ArrowRight) => self.seek_by(SEEK_STEP),
                     Key::Named(NamedKey::ArrowLeft) => self.seek_by(-SEEK_STEP),
+                    Key::Character(c) if c.eq_ignore_ascii_case("f") => self.seek_by(SEEK_STEP),
+                    Key::Character(c) if c.eq_ignore_ascii_case("b") => self.seek_by(-SEEK_STEP),
                     _ if repeat => {}
                     Key::Named(NamedKey::Escape) => event_loop.exit(),
                     Key::Named(NamedKey::Space) => self.feed.toggle_pause(),
+                    Key::Named(NamedKey::ArrowDown) => self.feed.next(),
+                    Key::Named(NamedKey::ArrowUp) => self.feed.previous(),
                     Key::Character(c) if c.eq_ignore_ascii_case("n") => self.feed.next(),
                     Key::Character(c) if c.eq_ignore_ascii_case("p") => self.feed.previous(),
                     Key::Character(c) if c == "[" => self.adjust_delay(-DELAY_STEP_MS),
@@ -314,7 +335,7 @@ impl ApplicationHandler for App {
                         if let Some(fraction) = self.dragging.take()
                             && let Some(duration) = self.feed.duration()
                         {
-                            self.feed.seek(f64::from(fraction) * duration);
+                            self.seek_to(f64::from(fraction) * duration);
                         }
                     }
                 }

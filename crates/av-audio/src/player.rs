@@ -174,6 +174,7 @@ impl Player {
                 queue: queue_tx,
                 shared: shared.clone(),
                 commands: rx,
+                deferred: None,
             };
             thread::Builder::new()
                 .name("av-decoder".into())
@@ -338,6 +339,8 @@ struct DecoderThread {
     queue: rtrb::Producer<f32>,
     shared: Arc<Shared>,
     commands: Receiver<Command>,
+    /// A command that arrived while flushing, to handle before any other.
+    deferred: Option<Interrupt>,
 }
 
 /// What interrupted queueing a track.
@@ -404,8 +407,8 @@ impl DecoderThread {
             } else {
                 // End of a non-looping playlist. Stay responsive to "previous".
                 self.shared.exhausted.store(true, Ordering::Release);
-                match self.commands.recv() {
-                    Ok(Command::Play(next, back)) => {
+                match self.next_command() {
+                    Interrupt::Play(next, back) => {
                         self.shared.exhausted.store(false, Ordering::Release);
                         if !self.flush() {
                             return;
@@ -413,7 +416,7 @@ impl DecoderThread {
                         failures = 0;
                         (track, backward) = (next.min(len - 1), back);
                     }
-                    Ok(Command::Seek(at, secs)) => {
+                    Interrupt::Seek(at, secs) => {
                         self.shared.exhausted.store(false, Ordering::Release);
                         if !self.flush() {
                             return;
@@ -421,7 +424,7 @@ impl DecoderThread {
                         failures = 0;
                         (track, start_at) = (at.min(len - 1), secs);
                     }
-                    Ok(Command::Stop) | Err(_) => return,
+                    Interrupt::Stop => return,
                 }
             }
         }
@@ -517,18 +520,36 @@ impl DecoderThread {
         let req = self.shared.flush_req.fetch_add(1, Ordering::AcqRel) + 1;
         self.shared.starts.lock().unwrap().clear();
         while self.shared.flush_ack.load(Ordering::Acquire) < req {
-            if let Some(Interrupt::Stop) = self.wait_command(BACKOFF) {
-                return false;
+            match self.receive(BACKOFF) {
+                Some(Interrupt::Stop) => return false,
+                // A newer jump (e.g. a quick second seek): handle it next,
+                // rather than dropping it.
+                Some(newer) => self.deferred = Some(newer),
+                None => {}
             }
         }
         true
+    }
+
+    /// Waits as long as it takes for the next command.
+    fn next_command(&mut self) -> Interrupt {
+        loop {
+            if let Some(cmd) = self.wait_command(Duration::from_secs(1)) {
+                return cmd;
+            }
+        }
     }
 
     fn poll_command(&mut self) -> Option<Interrupt> {
         self.wait_command(Duration::ZERO)
     }
 
+    /// The deferred command if there is one, else waits up to `timeout`.
     fn wait_command(&mut self, timeout: Duration) -> Option<Interrupt> {
+        self.deferred.take().or_else(|| self.receive(timeout))
+    }
+
+    fn receive(&mut self, timeout: Duration) -> Option<Interrupt> {
         let cmd = if timeout.is_zero() {
             self.commands.try_recv().ok()
         } else {
